@@ -13,14 +13,24 @@ async function request(url, options = {}) {
     try { data = JSON.parse(text); } catch { data = { error: text.slice(0, 400) }; }
   }
   if (!resp.ok) {
+    // FastAPI 的 detail 有几种形态：字符串、校验错误数组、或本项目约定的 {error, detail} 对象。
+    // 统一压成「一条可读消息 + 可选字符串补充」。关键点：error.detail 必须是**字符串**，
+    // 否则界面会把对象渲染成 [object Object]，把真正的原因（如「页码格式错误」）整个盖住。
     const d = data && data.detail;
-    const msg =
-      (d && typeof d === 'object' && d.error) ||
-      (typeof d === 'string' ? d : '') ||
-      (data && data.error) ||
-      resp.statusText ||
-      '请求失败';
-    const detail = (d && typeof d === 'object' && d.detail) || (data && data.detail) || '';
+    let msg = '';
+    let detail = '';
+    if (typeof d === 'string') {
+      msg = d;
+    } else if (Array.isArray(d)) {
+      msg = d.map((it) => (it && (it.msg || it.error)) || JSON.stringify(it)).join('；');
+    } else if (d && typeof d === 'object') {
+      msg = typeof d.error === 'string' ? d.error : '';
+      if (typeof d.detail === 'string') detail = d.detail;
+    }
+    if (!msg) {
+      msg = (data && typeof data.error === 'string' && data.error) || resp.statusText || '请求失败';
+    }
+    if (!detail && data && typeof data.detail === 'string') detail = data.detail;
     const error = new Error(msg);
     error.detail = detail;
     error.status = resp.status;

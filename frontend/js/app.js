@@ -714,7 +714,15 @@ function bindUI() {
   el.pageInput.addEventListener('change', (e) => gotoPage(Number(e.target.value)));
 
   $('btn-translate').addEventListener('click', () => {
-    const range = el.rangeInput.value.trim();
+    let range = el.rangeInput.value.trim();
+    // 页码范围只接受「数字 / 逗号 / 连字符 / 空格」。浏览器的表单自动填充（或误粘贴）
+    // 会把 Base URL 之类的内容塞进这个框——直接发给后端只会换来一条「页码格式错误」，
+    // 界面上还渲染成 [object Object]，看着像功能坏了。这里先拦下，回退为翻译当前页。
+    if (range && !/^[\d\s,，\-]+$/.test(range)) {
+      toast(`页码范围栏里有非页码内容（浏览器自动填充？）已忽略，改为翻译第 ${state.page} 页`, 'warn', 6000);
+      el.rangeInput.value = '';
+      range = '';
+    }
     startTranslate(range || String(state.page), el.chkForce.checked);
   });
   $('btn-translate-all').addEventListener('click', () => startTranslate('all', el.chkForce.checked));

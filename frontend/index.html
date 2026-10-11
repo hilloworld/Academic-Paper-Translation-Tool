@@ -25,14 +25,14 @@
   <div class="group pager" title="翻页（← → 键）">
     <button id="btn-first" class="btn icon" title="第一页">⏮</button>
     <button id="btn-prev" class="btn icon" title="上一页">◀</button>
-    <input id="page-input" class="page-input" type="number" min="1" value="1">
+    <input id="page-input" class="page-input" type="number" min="1" value="1" autocomplete="off">
     <span id="page-total" class="muted">/ 0</span>
     <button id="btn-next" class="btn icon" title="下一页">▶</button>
     <button id="btn-last" class="btn icon" title="最后一页">⏭</button>
   </div>
 
   <div class="group">
-    <input id="range-input" class="range-input" placeholder="页码范围，如 1-14" title="留空 = 全部页面">
+    <input id="range-input" class="range-input" placeholder="页码范围，如 1-14" title="留空 = 全部页面" autocomplete="off" spellcheck="false">
     <button id="btn-translate" class="btn primary" title="翻译指定页（T 键 = 当前页）">翻译</button>
     <button id="btn-translate-all" class="btn" title="翻译全部页面（A 键）">全部</button>
     <label class="chk" title="忽略缓存，重新调用模型"><input type="checkbox" id="chk-force">重译</label>
