@@ -834,18 +834,26 @@ def stage_frontend(report: Report, settings) -> None:
     miss_api = sorted(api_used - api_defined)
     report.check("前端调用的 api.* 方法均已在 api.js 实现", not miss_api, f"缺失：{miss_api}")
 
+    # 连续滚动：每页由 viewer.js 逐页生成，各带一份「原页渲染图 + 命中层」与「译文层」
     report.check("左侧原文层为整页渲染图 + 覆盖层（公式/图表位置不变）",
-                 'id="page-image"' in html and 'id="overlay-left"' in html)
-    report.check("右侧为独立的译文层（绝对定位片段）", 'id="trans-layer"' in html)
+                 "className = 'page-image'" in viewerjs and "className = 'overlay'" in viewerjs
+                 and 'id="stack-left"' in html)
+    report.check("右侧为独立的译文层（绝对定位片段）",
+                 "className = 'trans-layer'" in viewerjs
+                 and ".trans-layer { position: absolute" in (fe / "styles.css").read_text(encoding="utf-8"))
     report.check("左右两栏等分且可拖动分隔条", 'id="divider"' in html and "flex" in (fe / "styles.css").read_text(encoding="utf-8"))
     report.check("提供缩放滑块 / 快捷键 / 适应宽度",
                  'id="zoom-range"' in html and "btn-fit-width" in html and "ctrlKey" in viewerjs)
-    report.check("缩放时左右共用同一坐标（layout 中两 stage 同步尺寸）",
-                 "for (const stage of [this.el.stageLeft, this.el.stageRight])" in viewerjs)
+    report.check("缩放时左右共用同一坐标（layout 中两栏 stage 同步尺寸）",
+                 "for (const side of ['left', 'right'])" in viewerjs and "meta.width * s" in viewerjs)
     report.check("滚动同步为双向等比映射（翻页左右同步）",
                  "scrollLeft.addEventListener('scroll'" in viewerjs and "scrollRight.addEventListener('scroll'" in viewerjs)
+    report.check("连续滚动：页面纵向堆叠、滚轮即下一页、内容按需懒加载",
+                 ".page-stack" in (fe / "styles.css").read_text(encoding="utf-8")
+                 and "scrollToPage" in viewerjs and "ensurePage" in viewerjs
+                 and "loading = 'lazy'" in viewerjs)
     report.check("悬停/点击命中测试把像素换算回 PDF 坐标再查块",
-                 "px / this.scale" in viewerjs and "_hitTest(ptX, ptY)" in viewerjs)
+                 "px / this.scale" in viewerjs and "this._hitTest(slot, px / this.scale, py / this.scale)" in viewerjs)
     report.check("提供「⚙ 设置」入口与配置窗口（服务商/Base URL/模型/API Key）",
                  'id="btn-settings"' in html and 'id="settings-dialog"' in html
                  and all(f'id="{i}"' in html for i in
@@ -881,14 +889,14 @@ def stage_frontend(report: Report, settings) -> None:
                  and "translateTables" in appjs and "translateCaptions" in appjs)
     report.check("右栏以原页图为底（图片 / 表格 / 公式靠透出原图原样呈现）",
                  "original-base" in viewerjs and "original-base" in (fe / "styles.css").read_text(encoding="utf-8")
-                 and 'id="page-underlay"' in html)
+                 and "page-image underlay" in viewerjs)
     report.check("底衬开关默认开启，且状态本地记住",
                  'id="chk-underlay" checked' in html and "originalBase" in appjs)
     report.check("不可译片段不再渲染文字，只画「保留」轮廓（图片 / 表格 / 公式不被中文覆盖）",
                  "preserve" in viewerjs and "if (blk.translatable)" in viewerjs and "KIND_LABEL" in viewerjs
                  and "RENDERABLE_KINDS" not in viewerjs)
     report.check("保留区域（图 / 表）有独立虚框与命中区，悬停时与命中块联动高亮",
-                 "regionEls" in viewerjs and "region-hit" in viewerjs and "_paint" in viewerjs)
+                 "region-hit" in viewerjs and "_paint" in viewerjs and "regionId" in viewerjs)
     report.check("表格单元格按 hidden 标记跳过渲染（右栏直接显示原表）",
                  "blk.hidden" in viewerjs)
     report.check("译文块在原图底衬模式下为不透明白底（盖住原英文），未翻译片段保持透明",

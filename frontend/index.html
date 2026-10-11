@@ -64,13 +64,10 @@
       <span class="pane-hint">点击任意位置 → 查看该片段的原文 / 译文对照</span>
     </div>
     <div class="pane-scroll" id="scroll-left">
-      <div class="stage-wrap">
-        <div class="stage" id="stage-left">
-          <img id="page-image" class="page-image" alt="原文页面">
-          <div class="overlay" id="overlay-left"></div>
-          <div class="marker" id="marker-left" hidden>
-            <div class="marker-h"></div><div class="marker-v"></div><div class="marker-dot"></div>
-          </div>
+      <!-- 连续滚动：所有页面在本列里纵向排开，滚轮往下即下一页 -->
+      <div class="page-stack" id="stack-left">
+        <div class="marker" id="marker-left" hidden>
+          <div class="marker-h"></div><div class="marker-v"></div><div class="marker-dot"></div>
         </div>
       </div>
     </div>
@@ -84,13 +81,9 @@
       <span class="pane-hint" id="pane-right-hint">未翻译的片段显示为虚线框</span>
     </div>
     <div class="pane-scroll" id="scroll-right">
-      <div class="stage-wrap">
-        <div class="stage" id="stage-right">
-          <img id="page-underlay" class="page-image underlay" alt="" hidden>
-          <div class="trans-layer" id="trans-layer"></div>
-          <div class="marker" id="marker-right" hidden>
-            <div class="marker-h"></div><div class="marker-v"></div><div class="marker-dot"></div>
-          </div>
+      <div class="page-stack" id="stack-right">
+        <div class="marker" id="marker-right" hidden>
+          <div class="marker-h"></div><div class="marker-v"></div><div class="marker-dot"></div>
         </div>
       </div>
     </div>

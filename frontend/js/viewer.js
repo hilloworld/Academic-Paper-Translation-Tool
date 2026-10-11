@@ -1,7 +1,22 @@
-/* 对照视图引擎：坐标系换算、缩放联动、悬停高亮、滚动同步 */
+/* 对照视图引擎：坐标系换算、缩放联动、悬停高亮、滚动同步
+ *
+ * 渲染模型 —— 连续滚动（多页纵向堆叠）
+ * ------------------------------------
+ * 左右两栏各是一个**纵向堆叠**的页面列表（`.page-stack`），滚轮往下就是下一页：
+ *   左栏 stage = 原页渲染图 + 命中层（`.overlay`）
+ *   右栏 stage = 原页渲染图（底衬） + 译文层（`.trans-layer`）
+ * 文档一打开就按元数据里的 width/height 把**所有页的占位**铺好（滚动条长度立刻正确），
+ * 每页的块 / 译文在滚到附近时才按需取回并填充；已填充的页保留（来回滚动不抖、不重复请求）。
+ *
+ * 与旧版的区别：旧版一次只渲染一页（`setPage`），前后翻页靠重新加载；现在同一个
+ * `.page-stack` 里逐页排开，`scrollToPage(n)` 只是滚动定位，`_updateCurrentPage()`
+ * 依据滚动位置反推"当前第几页"。
+ *
+ * 坐标：PDF 坐标（pt，左上原点）由后端给出，前端只用同一个 `scale` 换算，左右共用。
+ */
 import { api } from './api.js';
 
-/* 渲染模型
+/* 渲染要点
  * --------
  * 右栏「译文层」以**原页渲染图**为底（可关），只有可译片段才用白底 + 中文覆盖上去。
  * 于是图片 / 表格 / 公式 / 参考文献这些"按设计不翻译"的区域，天然原样呈现，
@@ -21,15 +36,22 @@ const CJK_FROM = 0x2e80;      // 码点大于此值按 1 em 宽估算（中日�
 const MATH_TOKEN_RE = /⟦\s*(\d+)\s*⟧/g;   // 行内公式占位符（与后端 MATH_TOKEN_RE 对应）
 const LINE_UNIT = 1.32;       // 折行估算里的默认行高（em）
 
+const PREFETCH_FIRST = 3;     // 打开文档时先取前几页
+const PREFETCH_AHEAD = 3;     // 滚动时向后预取几页
+const FIT_WINDOW = 2;         // 需要做"实测校正"的页：当前页 ± 该值
+
 export class Viewer {
   /**
    * @param {object} refs DOM 引用集合
-   * @param {object} hooks { onSelect(block, event), onStatus(text), onFit(info), onZoom(scale) }
+   * @param {object} hooks {
+   *   onSelect(block, event), onStatus(text), onFit(info), onZoom(scale),
+   *   onPageChange(pageNo), loadPage(pageNo) -> Promise<pageData>
+   * }
    */
   constructor(refs, hooks = {}) {
     this.el = refs;
     this.hooks = hooks;
-    this.page = null;
+    this.doc = null;             // { docId, pageCount, pages: [{pageNo,width,height,image}] }
     this.scale = 1;
     this.fontScale = 1;
     this.strict = true;
@@ -37,69 +59,92 @@ export class Viewer {
     this.showUnderlay = true;    // 原图底衬：右栏是否以原页图为底（默认开）
     this.hoverHighlight = false; // 鼠标悬停是否联动高亮（默认关：路过页面时不打扰）
     this.activeId = null;
-    this.blockEls = new Map();   // blockId -> {hit, tblock, preserve}
-    this.regionEls = new Map();  // regionIndex -> {hit, el}
-    this.targets = [];           // 可命中的对象（块 + 保留区域），用于命中测试
+
+    this.slots = new Map();      // pageNo -> slot（含左右两栏的 stage 与块元素）
+    this.pageOrder = [];         // 页号升序
+    this.loading = new Set();    // 正在请求的页
+    this.elById = new Map();     // blockId / regionId -> { hit, tblock, preserve, slot, regionId }
+    this.targetById = new Map(); // blockId / regionId -> 块对象（供弹层显示）
+    this._current = 1;
     this._syncing = false;
+    this._suppress = false;
     this._bind();
+  }
+
+  get currentPage() { return this._current; }
+
+  /** 当前页的页面尺寸（供外部判断"是否处于适应宽度"） */
+  get pageSize() { return this._sizeOf(this._current); }
+
+  /** 当前页的页面尺寸（来自元数据，未加载内容时也可用） */
+  _sizeOf(pageNo) {
+    const slot = this.slots.get(pageNo);
+    return slot ? { width: slot.meta.width, height: slot.meta.height } : null;
   }
 
   // ---------------------------------------------------------------- 事件绑定
   _bind() {
-    const { overlayLeft, scrollLeft, scrollRight, transLayer } = this.el;
-
-    overlayLeft.addEventListener('mousemove', (ev) => this._onPointerMove(ev, 'left'));
-    overlayLeft.addEventListener('mouseleave', () => {
+    const { stackLeft, stackRight, scrollLeft, scrollRight } = this.el;
+    const clearHover = () => {
       if (!this.hoverHighlight) return;
       this._clearMarker();
       this.highlight(null);
-    });
-    overlayLeft.addEventListener('click', (ev) => {
+    };
+
+    // 事件委托：所有页面都在同一个 .page-stack 里，监听挂在容器上即可
+    stackLeft.addEventListener('mousemove', (ev) => this._onPointerMove(ev, 'left'));
+    stackLeft.addEventListener('mouseleave', clearHover);
+    stackLeft.addEventListener('click', (ev) => {
       const blk = this._onPointerMove(ev, 'left', true);
       if (blk) this.hooks.onSelect?.(blk, ev);
     });
 
-    transLayer.addEventListener('mousemove', (ev) => {
+    const idOf = (ev) => {
+      const node = ev.target instanceof Element ? ev.target.closest('[data-id]') : null;
+      return node ? node.dataset.id : null;
+    };
+    stackRight.addEventListener('mousemove', (ev) => {
       if (!this.hoverHighlight) return;
-      const id = ev.target?.dataset?.id;
-      if (id) { const blk = this.block(id); if (blk) { this.highlight(id); this._setMarker(blk, 'right'); } }
+      const id = idOf(ev);
+      const blk = id ? this.block(id) : null;
+      if (blk) { this.highlight(id); this._setMarker(blk, 'right', this.elById.get(id)?.slot); }
     });
-    transLayer.addEventListener('mouseleave', () => {
-      if (!this.hoverHighlight) return;
-      this._clearMarker();
-      this.highlight(null);
-    });
-    transLayer.addEventListener('click', (ev) => {
-      const id = ev.target?.dataset?.id;
-      if (id) { const blk = this.block(id); if (blk) this.hooks.onSelect?.(blk, ev); }
+    stackRight.addEventListener('mouseleave', clearHover);
+    stackRight.addEventListener('click', (ev) => {
+      const id = idOf(ev);
+      const blk = id ? this.block(id) : null;
+      if (blk) this.hooks.onSelect?.(blk, ev);
     });
 
-    // 滚动同步（比例映射，等比联动）
-    const sync = (src, dst) => () => {
-      if (this._syncing) return;
-      this._syncing = true;
-      requestAnimationFrame(() => {
-        try {
-          const sx = src.scrollLeft, sy = src.scrollTop;
-          const rx = src.scrollWidth - src.clientWidth;
-          const ry = src.scrollHeight - src.clientHeight;
-          const dx = dst.scrollWidth - dst.clientWidth;
-          const dy = dst.scrollHeight - dst.clientHeight;
-          dst.scrollLeft = rx > 0 ? (sx / rx) * dx : 0;
-          dst.scrollTop = ry > 0 ? (sy / ry) * dy : 0;
-        } finally {
-          this._syncing = false;
-        }
-      });
+    // 滚动同步（比例映射，等比联动）+ 当前页判定 + 按需预取
+    const onScroll = (src, dst) => () => {
+      if (!this._syncing) {
+        this._syncing = true;
+        requestAnimationFrame(() => {
+          try {
+            const sx = src.scrollLeft, sy = src.scrollTop;
+            const rx = src.scrollWidth - src.clientWidth;
+            const ry = src.scrollHeight - src.clientHeight;
+            const dx = dst.scrollWidth - dst.clientWidth;
+            const dy = dst.scrollHeight - dst.clientHeight;
+            dst.scrollLeft = rx > 0 ? (sx / rx) * dx : 0;
+            dst.scrollTop = ry > 0 ? (sy / ry) * dy : 0;
+          } finally {
+            this._syncing = false;
+          }
+        });
+      }
+      this._updateCurrentPage();
+      this.prefetch();
     };
-    scrollLeft.addEventListener('scroll', sync(scrollLeft, scrollRight), { passive: true });
-    scrollRight.addEventListener('scroll', sync(scrollRight, scrollLeft), { passive: true });
+    scrollLeft.addEventListener('scroll', onScroll(scrollLeft, scrollRight), { passive: true });
+    scrollRight.addEventListener('scroll', onScroll(scrollRight, scrollLeft), { passive: true });
 
     // Ctrl + 滚轮缩放（以指针为锚点）
     const wheel = (pane) => (ev) => {
       if (!ev.ctrlKey && !ev.metaKey) return;
       ev.preventDefault();
-      const anchor = this._stageAnchor(ev, pane);
+      const anchor = this._contentPoint(ev, pane);
       const factor = Math.exp(-ev.deltaY * 0.0018);
       this.setScale(this.scale * factor, anchor);
     };
@@ -107,49 +152,174 @@ export class Viewer {
     scrollRight.addEventListener('wheel', wheel('right'), { passive: false });
   }
 
-  // ---------------------------------------------------------------- 渲染
-  setPage(pageData) {
-    this.page = pageData;
+  // ---------------------------------------------------------------- 文档 / 页面铺位
+  /**
+   * 打开一份文档：按元数据把所有页的占位铺好（尺寸正确 → 滚动条长度立刻正确），
+   * 然后预取前几页的内容。
+   */
+  setDocument(doc) {
+    this.doc = doc;
     this.activeId = null;
-    this.blockEls.clear();
-    this.regionEls.clear();
-    this.targets = [];
-    const { stageLeft, stageRight, pageImage, pageUnderlay, overlayLeft, transLayer } = this.el;
+    this.slots.clear();
+    this.pageOrder = [];
+    this.loading.clear();
+    this.elById.clear();
+    this.targetById.clear();
+    // 只移除「页面槽」，保留堆叠容器里的十字标记元素（它们是常驻的）
+    for (const stack of [this.el.stackLeft, this.el.stackRight]) {
+      stack.querySelectorAll('.page-slot').forEach((n) => n.remove());
+    }
 
-    const url = api.asset(pageData.image);
-    pageImage.src = url;
-    pageUnderlay.src = url;
-    pageUnderlay.hidden = !this.showUnderlay;
+    const pages = doc.pages || [];
+    for (const meta of pages) this._createSlot(meta);
 
-    overlayLeft.innerHTML = '';
-    transLayer.innerHTML = '';
+    this._current = 1;
+    this.layout();
+    for (let p = 1; p <= Math.min(pages.length, PREFETCH_FIRST); p += 1) this.ensurePage(p);
+  }
+
+  _createSlot(meta) {
+    const pageNo = meta.pageNo;
+    const url = api.asset(meta.image);
+
+    const lslot = document.createElement('div');
+    lslot.className = 'page-slot';
+    lslot.dataset.page = String(pageNo);
+    const lstage = document.createElement('div');
+    lstage.className = 'stage';
+    const limg = document.createElement('img');
+    limg.className = 'page-image';
+    limg.loading = 'lazy';
+    limg.decoding = 'async';
+    limg.alt = `第 ${pageNo} 页原文`;
+    limg.src = url;
+    const loverlay = document.createElement('div');
+    loverlay.className = 'overlay';
+    lstage.append(limg, loverlay);
+    lslot.appendChild(lstage);
+    this.el.stackLeft.appendChild(lslot);
+
+    const rslot = document.createElement('div');
+    rslot.className = 'page-slot';
+    rslot.dataset.page = String(pageNo);
+    const rstage = document.createElement('div');
+    rstage.className = 'stage';
+    const runder = document.createElement('img');
+    runder.className = 'page-image underlay';
+    runder.loading = 'lazy';
+    runder.decoding = 'async';
+    runder.alt = '';
+    runder.src = url;
+    const rtrans = document.createElement('div');
+    rtrans.className = 'trans-layer';
+    rstage.append(runder, rtrans);
+    rslot.appendChild(rstage);
+    this.el.stackRight.appendChild(rslot);
+
+    const slot = {
+      pageNo, meta, data: null,
+      left: { stage: lstage, img: limg, overlay: loverlay },
+      right: { stage: rstage, underlay: runder, trans: rtrans },
+      blockEls: new Map(), targets: [], rooms: new Map(), fit: null, hasContent: false,
+    };
+    this.slots.set(pageNo, slot);
+    this.pageOrder.push(pageNo);
+    return slot;
+  }
+
+  /** 取回某页内容（带并发去重）；页面内容到位后填充 DOM */
+  async ensurePage(pageNo) {
+    const slot = this.slots.get(pageNo);
+    if (!slot || slot.hasContent || this.loading.has(pageNo) || !this.hooks.loadPage) return;
+    this.loading.add(pageNo);
+    try {
+      const data = await this.hooks.loadPage(pageNo);
+      if (data) this.setPageData(pageNo, data);
+    } catch { /* 单页取失败不影响其它页 */ } finally {
+      this.loading.delete(pageNo);
+    }
+  }
+
+  /** 滚动到附近时预取后续页 */
+  prefetch() {
+    if (!this.doc) return;
+    const total = this.slots.size;
+    for (let p = this._current; p <= Math.min(total, this._current + PREFETCH_AHEAD); p += 1) {
+      this.ensurePage(p);
+    }
+  }
+
+  /** 内容到位：填充块 / 译文，并做一次版式适配 */
+  setPageData(pageNo, data) {
+    const slot = this.slots.get(pageNo);
+    if (!slot) return;
+    slot.data = data;
+    if (slot.hasContent) return;
+    this._buildContent(slot, data);
+    slot.hasContent = true;
+    this._layoutSlot(slot);
+    this._correctFitSlot(slot);
+    this._markFitSlot(slot);
+    if (this._inFitWindow(pageNo)) this._emitFit();
+  }
+
+  _inFitWindow(pageNo) {
+    return Math.abs(pageNo - this._current) <= FIT_WINDOW;
+  }
+
+  /** 已经填充过内容的页号（用于"翻译完成后只刷新这些页"） */
+  renderedPages() {
+    return this.pageOrder.filter((p) => this.slots.get(p)?.hasContent);
+  }
+
+  /** 用新数据就地重建某页内容（翻译完成 / 换模型后刷新该页译文，不动其它页与滚动位置） */
+  refreshPage(pageNo, data) {
+    const slot = this.slots.get(pageNo);
+    if (!slot) return;
+    const pre = `p${pageNo}-`;        // 块 id 形如 p3-b5、区域 id 形如 p3-region-0
+    for (const id of [...this.elById.keys()]) if (id.startsWith(pre)) this.elById.delete(id);
+    for (const id of [...this.targetById.keys()]) if (id.startsWith(pre)) this.targetById.delete(id);
+    slot.hasContent = false;
+    this.setPageData(pageNo, data);
+  }
+
+  // ---------------------------------------------------------------- 内容渲染
+  _buildContent(slot, data) {
+    const { left, right } = slot;
+    left.overlay.innerHTML = '';
+    right.trans.innerHTML = '';
+    slot.blockEls.clear();
+    slot.targets = [];
 
     // ---- 保留区域（图片 / 表格）：画虚框 + 可命中，不渲染任何文字 ----
-    const regions = pageData.regions || [];
+    const regions = data.regions || [];
     regions.forEach((reg, i) => {
+      const id = `p${slot.pageNo}-region-${i}`;
       const box = document.createElement('div');
       box.className = `preserve region type-${reg.type}`;
-      box.dataset.id = `region-${i}`;
+      box.dataset.id = id;
       box.title = `${reg.type === 'table' ? '表格' : '图片'}区域：按设定原样保留，不翻译`
         + (reg.label ? `\n${reg.label}` : '');
-      transLayer.appendChild(box);
+      right.trans.appendChild(box);
       const hit = document.createElement('div');
       hit.className = 'hit region-hit';
+      hit.dataset.id = id;
       hit.dataset.region = String(i);
       hit.title = box.title;
-      overlayLeft.appendChild(hit);
-      this.regionEls.set(i, { el: box, hit });
+      left.overlay.appendChild(hit);
       const target = {
-        id: `region-${i}`, isRegion: true, regionIndex: i,
+        id, isRegion: true, regionIndex: i, pageNo: slot.pageNo,
         kind: reg.type === 'table' ? 'table' : 'figure',
         bbox: reg.bbox, text: reg.label || '', fontSize: 6,
         translatable: false, translation: '', lineCount: 0,
       };
-      this.targets.push(target);
+      slot.targets.push(target);
+      this.targetById.set(id, target);
+      this.elById.set(id, { hit, preserve: box, tblock: null, slot, regionId: null });
     });
 
     // ---- 文本块 ----
-    for (const blk of pageData.blocks) {
+    for (const blk of data.blocks) {
       if (STRUCTURAL.has(blk.kind) || blk.hidden) continue;
       const inRegion = blk.regionIndex !== null && blk.regionIndex !== undefined;
 
@@ -158,7 +328,7 @@ export class Viewer {
       hit.className = `hit kind-${blk.kind}`;
       hit.dataset.id = blk.id;
       hit.title = blk.text ? blk.text.slice(0, 160) : '';
-      overlayLeft.appendChild(hit);
+      left.overlay.appendChild(hit);
 
       let tblock = null;
       let preserve = null;
@@ -170,9 +340,9 @@ export class Viewer {
         if (empty) {
           tblock.textContent = '';
         } else {
-          this._fillTranslation(tblock, blk);
+          this._fillTranslation(tblock, blk, slot.meta);
         }
-        transLayer.appendChild(tblock);
+        right.trans.appendChild(tblock);
       } else if (!inRegion) {
         // 不在区域内的"保留原文"块（公式 / 参考文献 / 图表标题）：不写文字，
         // 只留一个轮廓层，悬停时会亮起来，让用户知道这里保留了原文。
@@ -181,18 +351,22 @@ export class Viewer {
         preserve.dataset.id = blk.id;
         const label = KIND_LABEL[blk.kind] || '该片段';
         preserve.title = `${label}：按设定保留原文，不翻译（可在「⚙ 设置」里调整）`;
-        transLayer.appendChild(preserve);
+        right.trans.appendChild(preserve);
       }
 
-      this.blockEls.set(blk.id, {
+      slot.blockEls.set(blk.id, {
         hit, tblock, preserve,
         region: inRegion ? blk.regionIndex : null,
-        el: tblock || preserve,
+        regionId: inRegion ? `p${slot.pageNo}-region-${blk.regionIndex}` : null,
       });
-      this.targets.push(blk);
+      slot.targets.push(blk);
+      this.targetById.set(blk.id, blk);
+      this.elById.set(blk.id, {
+        hit, tblock, preserve, slot,
+        regionId: inRegion ? `p${slot.pageNo}-region-${blk.regionIndex}` : null,
+      });
     }
-    this._computeRooms();
-    this.layout();
+    this._computeRooms(slot);
   }
 
   /**
@@ -202,7 +376,7 @@ export class Viewer {
    * 贴回**原图的小块**——公式永远以原文像素呈现，不会被模型改写，也不会被白底盖住。
    * 模型漏掉占位符时，缺失的公式块补在段末，保证公式不会丢。
    */
-  _fillTranslation(el, blk) {
+  _fillTranslation(el, blk, meta) {
     const text = blk.translation || '';
     const runs = new Map((blk.math || []).map((r) => [String(r.key), r]));
     let last = 0;
@@ -212,7 +386,7 @@ export class Viewer {
       if (m.index > last) el.appendChild(document.createTextNode(text.slice(last, m.index)));
       const run = runs.get(m[1]);
       if (run) {
-        el.appendChild(this._mathPatch(run, blk));
+        el.appendChild(this._mathPatch(run, blk, meta));
         runs.delete(m[1]);
       }
       last = m.index + m[0].length;
@@ -220,19 +394,19 @@ export class Viewer {
     if (last < text.length) el.appendChild(document.createTextNode(text.slice(last)));
     for (const run of runs.values()) {           // 模型漏掉的公式：补在段末
       el.appendChild(document.createTextNode(' '));
-      el.appendChild(this._mathPatch(run, blk, true));
+      el.appendChild(this._mathPatch(run, blk, meta, true));
     }
   }
 
   /** 行内公式小块：用整页渲染图做背景，按坐标切出原文，作为行内元素随文字自然流转 */
-  _mathPatch(run, blk, inlineAtEnd = false) {
+  _mathPatch(run, blk, meta, inlineAtEnd = false) {
     const [x0, y0, x1, y1] = run.bbox;
     const box = document.createElement('span');
     box.className = 'math-patch' + (inlineAtEnd ? ' at-end' : '');
-    const geo = this._patchGeom(run, blk);
+    const geo = this._patchGeom(run, blk, meta);
     box.style.width = `${geo.w.toFixed(1)}px`;
     box.style.height = `${geo.h.toFixed(1)}px`;
-    box.style.backgroundImage = `url(${api.asset(this.page.image)})`;
+    box.style.backgroundImage = `url(${api.asset(meta.image)})`;
     box.style.backgroundSize = `${geo.bgW.toFixed(1)}px ${geo.bgH.toFixed(1)}px`;
     box.style.backgroundPosition = `${geo.bgX.toFixed(1)}px ${geo.bgY.toFixed(1)}px`;
     box.title = `行内公式（原文 ${(x1 - x0).toFixed(0)}×${(y1 - y0).toFixed(0)}pt）：按原图呈现，不翻译`;
@@ -247,7 +421,7 @@ export class Viewer {
    * 否则它会撑破一行、把中文挤成一条细缝（踩过：用 float 贴回原位时，
    * 每个公式都在右侧"挖"掉一块行宽，整段被挤成 27 行）。
    */
-  _patchGeom(run, blk) {
+  _patchGeom(run, blk, meta) {
     const s = this.scale;
     const [x0, y0, x1, y1] = run.bbox;
     const contentW = Math.max(8, (blk.bbox[2] - blk.bbox[0]) * s - 2);
@@ -261,20 +435,14 @@ export class Viewer {
     }
     return {
       w, h, k,
-      bgW: this.page.width * s * k,
-      bgH: this.page.height * s * k,
+      bgW: meta.width * s * k,
+      bgH: meta.height * s * k,
       bgX: -x0 * s * k,
       bgY: -y0 * s * k,
     };
   }
 
-  block(id) {
-    if (typeof id === 'string' && id.startsWith('region-')) {
-      const i = Number(id.slice(7));
-      return this.targets.find((t) => t.isRegion && t.regionIndex === i) || null;
-    }
-    return this.page?.blocks.find((b) => b.id === id) || null;
-  }
+  block(id) { return this.targetById.get(id) || null; }
 
   /**
    * 预计算每个片段正下方"还能借用多少空白"（pt）。
@@ -289,12 +457,13 @@ export class Viewer {
    * 可借用的空白是 0。旧写法会把这种障碍物当成"不在下方"跳过，于是去量更远的
    * 那一块，让中文一路长过去压住下一段（踩过）。
    */
-  _computeRooms() {
+  _computeRooms(slot) {
     const obstacles = [];
-    for (const t of this.targets) obstacles.push(t.bbox);
-    this.rooms = new Map();
-    for (const blk of this.page.blocks) {
-      if (!this.blockEls.has(blk.id)) continue;
+    for (const t of slot.targets) obstacles.push(t.bbox);
+    slot.rooms = new Map();
+    const blocks = slot.data?.blocks || [];
+    for (const blk of blocks) {
+      if (!slot.blockEls.has(blk.id)) continue;
       const [x0, y0, x1, y1] = blk.bbox;
       let room = Infinity;
       for (const [ox0, oy0, ox1, oy1] of obstacles) {
@@ -304,24 +473,51 @@ export class Viewer {
         if (ov <= 0.3 * Math.min(x1 - x0, ox1 - ox0)) continue;  // 不同栏
         room = Math.min(room, Math.max(0, oy0 - y1));            // 重叠时为 0
       }
-      this.rooms.set(blk.id, Number.isFinite(room) ? room : 0);
+      slot.rooms.set(blk.id, Number.isFinite(room) ? room : 0);
     }
   }
 
+  // ---------------------------------------------------------------- 版式
   /** 依据当前缩放重新计算所有几何量（左右两栏共用同一套坐标） */
   layout() {
-    if (!this.page) return;
-    const s = this.scale;
-    const w = this.page.width * s;
-    const h = this.page.height * s;
-    for (const stage of [this.el.stageLeft, this.el.stageRight]) {
-      stage.style.width = `${w}px`;
-      stage.style.height = `${h}px`;
+    for (const slot of this.slots.values()) this._layoutSlot(slot);
+    for (const slot of this.slots.values()) {
+      if (slot.hasContent && this._inFitWindow(slot.pageNo)) this._correctFitSlot(slot);
     }
-    this.el.pageImage.style.width = `${w}px`;
-    this.el.pageImage.style.height = `${h}px`;
-    this.el.pageUnderlay.style.width = `${w}px`;
-    this.el.pageUnderlay.style.height = `${h}px`;
+    for (const slot of this.slots.values()) {
+      if (slot.hasContent && this._inFitWindow(slot.pageNo)) this._markFitSlot(slot);
+    }
+    this._cacheTops();
+    this._emitFit();
+  }
+
+  /**
+   * 缓存每页在"滚动内容坐标"里的顶部位置。
+   * stage 的高度由 layout 显式指定（不依赖图片加载），因此该偏移是稳定的，
+   * 滚动时无需反复做布局查询（41 页 × 每帧 = 卡顿来源）。
+   */
+  _cacheTops() {
+    const base = this.el.stackLeft.getBoundingClientRect().top;
+    for (const p of this.pageOrder) {
+      const slot = this.slots.get(p);
+      slot.topInStack = slot.left.stage.getBoundingClientRect().top - base;
+    }
+  }
+
+  _layoutSlot(slot) {
+    const s = this.scale;
+    const meta = slot.meta;
+    const w = meta.width * s;
+    const h = meta.height * s;
+    for (const side of ['left', 'right']) {
+      const st = slot[side].stage;
+      st.style.width = `${w}px`;
+      st.style.height = `${h}px`;
+      const img = side === 'left' ? slot.left.img : slot.right.underlay;
+      img.style.width = `${w}px`;
+      img.style.height = `${h}px`;
+    }
+    if (!slot.hasContent) return;
 
     const place = (node, bbox) => {
       const [x0, y0, x1, y1] = bbox;
@@ -331,13 +527,16 @@ export class Viewer {
       });
     };
 
-    for (const [i, { el, hit }] of this.regionEls.entries()) {
-      place(el, this.page.regions[i].bbox);
-      place(hit, this.page.regions[i].bbox);
+    const regions = slot.data.regions || [];
+    for (let i = 0; i < regions.length; i += 1) {
+      const e = this.elById.get(`p${slot.pageNo}-region-${i}`);
+      if (!e) continue;
+      place(e.preserve, regions[i].bbox);
+      place(e.hit, regions[i].bbox);
     }
 
-    for (const blk of this.page.blocks) {
-      const els = this.blockEls.get(blk.id);
+    for (const blk of slot.data.blocks) {
+      const els = slot.blockEls.get(blk.id);
       if (!els) continue;
       const [x0, y0, x1, y1] = blk.bbox;
       const left = x0 * s;
@@ -354,8 +553,8 @@ export class Viewer {
         const lineHeight = blk.kind === 'formula' ? 1.5 : 1.32;
         const base = Math.max(6, Math.min(46, blk.fontSize * s * this.fontScale));
         const text = els.tblock.textContent || '';
-        const room = ((this.rooms && this.rooms.get(blk.id)) || 0) * s;
-        const patches = this._patchWidths(blk);
+        const room = ((slot.rooms && slot.rooms.get(blk.id)) || 0) * s;
+        const patches = this._patchWidths(blk, slot.meta);
         const fit = this._fitBlock(text, bw, bh, bh + room, base, lineHeight, patches);
         // 有比行盒还高的公式小块时改用 normal：固定 line-height 不会为行内块让位，
         // 高出来的部分会直接压到上下两行上（分式尤其明显，实测第 6 页 "Proof." 那段
@@ -376,8 +575,6 @@ export class Viewer {
         els.tblock.dataset.overflow = fit.h > bh + room + 1 ? '1' : '0';
       }
     }
-    this._correctFit();
-    this._markFit();
   }
 
   /**
@@ -389,11 +586,12 @@ export class Viewer {
    * 里有 4 块这样轻轻叠住。这里按 可用高 / 实际高 的比例再缩一次字号，最多迭代两轮：
    * 字号只会变小，因此一定收敛，不会来回抖。
    */
-  _correctFit() {
+  _correctFitSlot(slot) {
+    const blocks = slot.data?.blocks || [];
     for (let pass = 0; pass < 3; pass += 1) {
       let fixed = 0;
-      for (const blk of this.page.blocks) {
-        const els = this.blockEls.get(blk.id);
+      for (const blk of blocks) {
+        const els = slot.blockEls.get(blk.id);
         const el = els && els.tblock;
         if (!el || !el.textContent) continue;
         const avail = parseFloat(el.dataset.avail || '0');
@@ -411,8 +609,8 @@ export class Viewer {
       }
       if (!fixed) break;
     }
-    for (const blk of this.page.blocks) {
-      const els = this.blockEls.get(blk.id);
+    for (const blk of blocks) {
+      const els = slot.blockEls.get(blk.id);
       const el = els && els.tblock;
       if (!el || !el.textContent) continue;
       const avail = parseFloat(el.dataset.avail || '0');
@@ -421,10 +619,10 @@ export class Viewer {
   }
 
   /** 每个行内公式占位符贴出来以后占多大（像素），供折行估算使用 */
-  _patchWidths(blk) {
+  _patchWidths(blk, meta) {
     const map = new Map();
     for (const r of blk.math || []) {
-      const g = this._patchGeom(r, blk);
+      const g = this._patchGeom(r, blk, meta);
       map.set(String(r.key), { w: g.w, h: g.h });
     }
     return map;
@@ -546,16 +744,16 @@ export class Viewer {
   }
 
   /**
-   * 标注版式适配结果：
+   * 标注版式适配结果（每页各记一份，界面只汇报"当前页"）：
    * * shrunk     —— 为了塞进原块（含可借用的空白）而缩小了字号
    * * overflowed —— 缩到下限仍放不下，框已向下长高、可能压到下一个块（保证文字完整）
    */
-  _markFit() {
+  _markFitSlot(slot) {
     let shrunk = 0;
     let clipped = 0;
     let spilling = 0;
     let total = 0;
-    for (const { tblock } of this.blockEls.values()) {
+    for (const { tblock } of slot.blockEls.values()) {
       if (!tblock || !tblock.textContent) continue;
       tblock.classList.remove('clipped', 'spilling', 'shrunk', 'overflowed');
       tblock.classList.toggle('overflowed', tblock.dataset.overflow === '1');
@@ -577,7 +775,65 @@ export class Viewer {
         }
       }
     }
-    this.hooks.onFit?.({ shrunk, clipped, spilling, total });
+    slot.fit = { shrunk, clipped, spilling, total };
+  }
+
+  _emitFit() {
+    const slot = this.slots.get(this._current);
+    this.hooks.onFit?.(slot?.fit || { shrunk: 0, clipped: 0, spilling: 0, total: 0 });
+  }
+
+  // ---------------------------------------------------------------- 滚动 / 当前页
+  /**
+   * 依据左栏滚动位置反推"当前第几页"（取视口上部 1/3 处落在哪一页），
+   * 变化时通知外部（刷新页码、提示、预取）。
+   */
+  _updateCurrentPage() {
+    if (!this.doc || this._suppress) return;
+    const sc = this.el.scrollLeft;
+    const probe = sc.scrollTop + sc.clientHeight * 0.34;
+    let best = this._current;
+    let bestDist = Infinity;
+    for (const p of this.pageOrder) {
+      const slot = this.slots.get(p);
+      const top = this._slotTop(slot);
+      const h = slot.left.stage.offsetHeight;
+      if (probe >= top && probe < top + h) { best = p; bestDist = 0; break; }
+      const d = Math.min(Math.abs(probe - top), Math.abs(probe - (top + h)));
+      if (d < bestDist) { bestDist = d; best = p; }
+    }
+    if (best !== this._current) {
+      this._current = best;
+      this.hooks.onPageChange?.(best);
+      this._emitFit();
+      // 新进入适配窗口的页补做一次实测校正
+      for (const p of this.pageOrder) {
+        const slot = this.slots.get(p);
+        if (slot.hasContent && this._inFitWindow(p)) { this._correctFitSlot(slot); this._markFitSlot(slot); }
+      }
+      this._emitFit();
+    }
+  }
+
+  /** 某页 stage 在"滚动内容坐标"里的顶部位置（页面堆叠在同一列里） */
+  _slotTop(slot) {
+    if (typeof slot.topInStack === 'number') return slot.topInStack;
+    const stack = this.el.stackLeft;
+    return slot.left.stage.getBoundingClientRect().top - stack.getBoundingClientRect().top;
+  }
+
+  scrollToPage(pageNo) {
+    const slot = this.slots.get(pageNo);
+    if (!slot) return;
+    const top = Math.max(0, this._slotTop(slot) - 10);
+    this.el.scrollLeft.scrollTop = top;
+    this.el.scrollRight.scrollTop = top;
+    this._current = pageNo;
+    // 程序化滚动会立刻触发 scroll 事件：短暂抑制"按滚动反推当前页"，
+    // 免得它把刚定位好的页码又改掉（定位与反推互相打架）。
+    this._suppress = true;
+    clearTimeout(this._suppressTimer);
+    this._suppressTimer = setTimeout(() => { this._suppress = false; }, 80);
   }
 
   // ---------------------------------------------------------------- 缩放
@@ -585,21 +841,25 @@ export class Viewer {
     const old = this.scale;
     const next = Math.max(0.2, Math.min(5, scale));
     if (Math.abs(next - old) < 1e-4) return;
-    const anchorX = anchor ? anchor.x : (this.el.scrollLeft.scrollLeft + this.el.scrollLeft.clientWidth / 2 - this.el.stageLeft.offsetLeft);
-    const anchorY = anchor ? anchor.y : (this.el.scrollLeft.scrollTop + this.el.scrollLeft.clientHeight / 2 - this.el.stageLeft.offsetTop);
+    const scl = this.el.scrollLeft;
+    const ax = anchor ? anchor.x : (scl.scrollLeft + scl.clientWidth / 2);
+    const ay = anchor ? anchor.y : (scl.scrollTop + scl.clientHeight / 2);
     this.scale = next;
     this.layout();
     const k = next / Math.max(old, 1e-6);
-    this._centerOn(anchorX * k, anchorY * k);
+    for (const sc of [this.el.scrollLeft, this.el.scrollRight]) {
+      sc.scrollLeft = ax * k - sc.clientWidth / 2;
+      sc.scrollTop = ay * k - sc.clientHeight / 2;
+    }
     this._clearMarker();
     this.hooks.onZoom?.(next);
   }
 
-  _centerOn(px, py) {
-    for (const [scroll, stage] of [[this.el.scrollLeft, this.el.stageLeft], [this.el.scrollRight, this.el.stageRight]]) {
-      scroll.scrollLeft = stage.offsetLeft + px - scroll.clientWidth / 2;
-      scroll.scrollTop = stage.offsetTop + py - scroll.clientHeight / 2;
-    }
+  /** 指针在某一栏"滚动内容坐标"里的位置（用于 Ctrl+滚轮以指针为中心缩放） */
+  _contentPoint(ev, pane) {
+    const sc = pane === 'left' ? this.el.scrollLeft : this.el.scrollRight;
+    const r = sc.getBoundingClientRect();
+    return { x: ev.clientX - r.left + sc.scrollLeft, y: ev.clientY - r.top + sc.scrollTop };
   }
 
   get viewportSize() {
@@ -608,25 +868,20 @@ export class Viewer {
   }
 
   fitWidth() {
-    if (!this.page) return;
-    this.setScale(this.viewportSize.width / this.page.width);
+    const p = this._sizeOf(this._current);
+    if (!p) return;
+    this.setScale(this.viewportSize.width / p.width);
   }
 
   fitPage() {
-    if (!this.page) return;
+    const p = this._sizeOf(this._current);
+    if (!p) return;
     const { width, height } = this.viewportSize;
-    this.setScale(Math.min(width / this.page.width, height / this.page.height));
+    this.setScale(Math.min(width / p.width, height / p.height));
   }
 
-  setFontScale(v) {
-    this.fontScale = v;
-    this.layout();
-    this._clearMarker();
-  }
+  setFontScale(v) { this.fontScale = Number(v) || 1; this.layout(); }
 
-  setStrict(v) { this.strict = v; this.layout(); }
-
-  /** 溢出模式：不缩字号，译文超出原块高度时完整显示（可能压住下方块） */
   setOverflow(v) { this.overflowMode = !!v; this.layout(); }
 
   /**
@@ -636,7 +891,6 @@ export class Viewer {
    */
   setUnderlay(v) {
     this.showUnderlay = !!v;
-    this.el.pageUnderlay.hidden = !this.showUnderlay;
     document.body.classList.toggle('original-base', this.showUnderlay);
   }
 
@@ -649,7 +903,7 @@ export class Viewer {
     if (!this.hoverHighlight) { this.highlight(null); this._clearMarker(); }
   }
 
-  // ---------------------------------------------------------------- 高亮
+  // ---------------------------------------------------------------- 高亮 / 定位
   highlight(id) {
     if (this.activeId === id) return;
     if (this.activeId) this._paint(this.activeId, false);
@@ -658,33 +912,27 @@ export class Viewer {
   }
 
   _paint(id, on) {
+    const e = this.elById.get(id);
+    if (!e) return;
     const act = (node) => node && node.classList[on ? 'add' : 'remove']('active');
-    if (id.startsWith('region-')) {
-      const r = this.regionEls.get(Number(id.slice(7)));
-      act(r?.hit);
-      act(r?.el);
-      return;
-    }
-    const els = this.blockEls.get(id);
-    if (!els) return;
-    act(els.hit);
-    act(els.tblock);
-    act(els.preserve);
+    act(e.hit);
+    act(e.tblock);
+    act(e.preserve);
     // 块落在某个保留区域内时，连带把整个区域一起点亮
-    if (els.region !== null && els.region !== undefined) {
-      const r = this.regionEls.get(els.region);
-      act(r?.hit);
-      act(r?.el);
+    if (e.regionId) {
+      const re = this.elById.get(e.regionId);
+      if (re) { act(re.hit); act(re.preserve); }
     }
   }
 
   /** 把译文层滚动到可见位置（点击定位时使用） */
   revealRight(id) {
-    const cur = this.blockEls.get(id);
-    const node = cur?.tblock || cur?.preserve;
+    const e = this.elById.get(id);
+    const node = e && (e.tblock || e.preserve);
     if (!node) return;
     const sc = this.el.scrollRight;
-    const top = node.offsetTop;
+    const nr = node.getBoundingClientRect();
+    const top = nr.top - sc.getBoundingClientRect().top + sc.scrollTop;
     const bottom = top + node.offsetHeight;
     const viewTop = sc.scrollTop;
     const viewBottom = viewTop + sc.clientHeight;
@@ -695,14 +943,15 @@ export class Viewer {
 
   /** 命中测试：把鼠标位置换算成 PDF 坐标，再找包含它的文本块 */
   _onPointerMove(ev, pane, select = false) {
-    if (!this.page) return null;
-    const stage = pane === 'left' ? this.el.stageLeft : this.el.stageRight;
-    const rect = stage.getBoundingClientRect();
+    const found = this._slotUnder(ev, pane);
+    if (!found) {
+      if (!select && this.hoverHighlight) { this.highlight(null); this._clearMarker(); }
+      return null;
+    }
+    const { slot, rect } = found;
     const px = ev.clientX - rect.left;
     const py = ev.clientY - rect.top;
-    const ptX = px / this.scale;
-    const ptY = py / this.scale;
-    const blk = this._hitTest(ptX, ptY);
+    const blk = this._hitTest(slot, px / this.scale, py / this.scale);
     if (!blk) {
       if (!select && this.hoverHighlight) { this.highlight(null); this._clearMarker(); }
       return null;
@@ -711,16 +960,30 @@ export class Viewer {
     // （点击命中仍然返回 blk，保证弹详情、滚动定位照常工作）
     if (this.hoverHighlight) {
       this.highlight(blk.id);
-      this._setMarker(blk, pane, px, py);
+      this._setMarker(blk, pane, slot, px, py);
     }
     return blk;
   }
 
+  /** 找到指针所在的已渲染页面（返回该 slot 与该页 stage 的屏幕矩形） */
+  _slotUnder(ev, pane) {
+    for (const p of this.pageOrder) {
+      const slot = this.slots.get(p);
+      if (!slot.hasContent) continue;
+      const rect = slot[pane].stage.getBoundingClientRect();
+      if (ev.clientX >= rect.left && ev.clientX <= rect.right
+        && ev.clientY >= rect.top && ev.clientY <= rect.bottom) {
+        return { slot, rect };
+      }
+    }
+    return null;
+  }
+
   /** 命中测试：把鼠标位置换算成 PDF 坐标，再找包含它的块（块优先于保留区域） */
-  _hitTest(x, y) {
+  _hitTest(slot, x, y) {
     let best = null;
     let bestArea = Infinity;
-    for (const blk of this.targets) {
+    for (const blk of slot.targets) {
       const [x0, y0, x1, y1] = blk.bbox;
       if (x >= x0 - 1.5 && x <= x1 + 1.5 && y >= y0 - 1.5 && y <= y1 + 1.5) {
         const area = (x1 - x0) * (y1 - y0);
@@ -731,7 +994,7 @@ export class Viewer {
     // 容差内取最近的块
     let nearest = null;
     let nd = 28; // pt
-    for (const blk of this.targets) {
+    for (const blk of slot.targets) {
       const [x0, y0, x1, y1] = blk.bbox;
       const cx = Math.min(Math.max(x, x0), x1);
       const cy = Math.min(Math.max(y, y0), y1);
@@ -741,16 +1004,26 @@ export class Viewer {
     return nearest;
   }
 
-  /** 十字标记：左右两栏放在同一屏幕偏移处，直观体现"同坐标" */
-  _setMarker(blk, pane, px, py) {
-    let x = px;
-    let y = py;
-    if (x === undefined) {
-      const [x0, y0, x1, y1] = blk.bbox;
-      x = ((x0 + x1) / 2) * this.scale;
-      y = ((y0 + y1) / 2) * this.scale;
-    }
-    for (const m of [this.el.markerLeft, this.el.markerRight]) {
+  /**
+   * 十字标记：左右两栏各自换算到"本页 stage 内"的偏移，直观体现"同坐标"。
+   * 标记元素挂在两栏的 `.page-stack` 里（随内容滚动），坐标因此用堆叠内容坐标。
+   */
+  _setMarker(blk, pane, slot, px, py) {
+    const target = slot || this.slots.get(this._current);
+    if (!target) return;
+    for (const [m, side] of [[this.el.markerLeft, 'left'], [this.el.markerRight, 'right']]) {
+      const st = target[side].stage;
+      const off = this._stageOffsetInStack(st);
+      let x;
+      let y;
+      if (px === undefined) {
+        const [x0, y0, x1, y1] = blk.bbox;
+        x = ((x0 + x1) / 2) * this.scale + off.left;
+        y = ((y0 + y1) / 2) * this.scale + off.top;
+      } else {
+        x = px + off.left;
+        y = py + off.top;
+      }
       m.hidden = false;
       m.querySelector('.marker-h').style.top = `${y}px`;
       m.querySelector('.marker-v').style.left = `${x}px`;
@@ -760,14 +1033,17 @@ export class Viewer {
     }
   }
 
+  /** stage 相对所属 `.page-stack`（含 padding）的偏移，用于把 stage 内坐标换成堆叠坐标 */
+  _stageOffsetInStack(stage) {
+    const stack = stage.closest('.page-stack');
+    if (!stack) return { left: 0, top: 0 };
+    const sr = stack.getBoundingClientRect();
+    const gr = stage.getBoundingClientRect();
+    return { left: gr.left - sr.left, top: gr.top - sr.top };
+  }
+
   _clearMarker() {
     this.el.markerLeft.hidden = true;
     this.el.markerRight.hidden = true;
-  }
-
-  _stageAnchor(ev, pane) {
-    const stage = pane === 'left' ? this.el.stageLeft : this.el.stageRight;
-    const rect = stage.getBoundingClientRect();
-    return { x: ev.clientX - rect.left, y: ev.clientY - rect.top };
   }
 }

@@ -202,7 +202,8 @@ LLM_PROVIDER=custom LLM_BASE_URL=https://your-host/v1 LLM_MODEL=your-model LLM_A
 │   ├── preview-p3-figure.png      # 右栏效果预览：图片与公式原样保留
 │   ├── preview-fit-page4.png      # 真实论文第 4 页：段落无缝、行内公式按原图贴回
 │   ├── preview-fit-page6.png      # 真实论文第 6 页：密集公式页，译文无裁切无压盖
-│   └── ui-layout.png              # 界面总览：顶部工具栏 / 底部居中翻页 / 右下角缩放
+│   ├── ui-layout.png              # 界面总览：顶部工具栏 / 底部居中翻页 / 右下角缩放
+│   └── ui-continuous.png          # 连续滚动：多页纵向堆叠，滚轮往下即下一页
 └── data/                      # 运行时生成：uploads/ docs/ cache/ debug/ runtime-config.json
 ```
 
@@ -422,4 +423,5 @@ uv run python tools/preview_preserve.py <docId> 3              # 生成「右栏
 | `docs/preview-fit-page4.png` | 真实论文第 4 页左右对照（段落缝合 + 行内公式贴回原图 + 译文零裁切） |
 | `docs/preview-fit-page6.png` | 真实论文第 6 页左右对照（密集公式页，同样零裁切、零压盖） |
 | `docs/ui-layout.png` | 界面总览：工具栏分区、底部居中翻页、右下角缩放 |
+| `docs/ui-continuous.png` | 连续滚动：页面纵向堆叠，第 1 页末尾与第 2 页开头同框 |
 | 本文件 | 使用说明 |

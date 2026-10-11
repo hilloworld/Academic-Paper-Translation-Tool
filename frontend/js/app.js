@@ -11,12 +11,8 @@ const el = {
   divider: $('divider'),
   scrollLeft: $('scroll-left'),
   scrollRight: $('scroll-right'),
-  stageLeft: $('stage-left'),
-  stageRight: $('stage-right'),
-  pageImage: $('page-image'),
-  pageUnderlay: $('page-underlay'),
-  overlayLeft: $('overlay-left'),
-  transLayer: $('trans-layer'),
+  stackLeft: $('stack-left'),
+  stackRight: $('stack-right'),
   markerLeft: $('marker-left'),
   markerRight: $('marker-right'),
   paneRightHint: $('pane-right-hint'),
@@ -77,6 +73,7 @@ const state = {
   cfg: null,
   doc: null,
   page: 1,
+  pages: new Map(),  // 已取回的页数据（pageNo -> page_payload），供翻页时直接取用
   pageData: null,
   job: null,
   es: null,
@@ -86,10 +83,7 @@ const state = {
 };
 
 const viewer = new Viewer(
-  {
-    ...el,
-    pageImage: el.pageImage,
-  },
+  { ...el },
   {
     onSelect: (block, ev) => showPopover(block, ev),
     onZoom: (s) => {
@@ -98,8 +92,20 @@ const viewer = new Viewer(
       saveLocal('scale', s);
     },
     onFit: (info) => renderFitHint(info),
+    onPageChange: (pageNo) => { applyCurrentPage(pageNo); hidePopover(); },
+    loadPage: (pageNo) => getPageData(pageNo),
   },
 );
+
+/** 取某页数据（带缓存与并发去重） */
+async function getPageData(pageNo) {
+  if (!state.doc) return null;
+  if (state.pages.has(pageNo)) return state.pages.get(pageNo);
+  const data = await api.getPage(state.doc.docId, pageNo);
+  state.pages.set(pageNo, data);
+  if (pageNo === state.page) applyCurrentPage(pageNo);   // 内容到位后刷新提示 / 进度
+  return data;
+}
 
 // ======================================================================
 // 通用 UI 工具
@@ -330,12 +336,18 @@ async function applySummary(summary, label) {
 
 function renderDoc(doc) {
   state.doc = doc;
+  state.pages = new Map();
+  state.pageData = null;
+  state.baseHint = '';
+  state.fitInfo = null;
   el.docName.textContent = `${doc.filename} · ${doc.pageCount} 页`;
   el.pageTotal.textContent = `/ ${doc.pageCount}`;
   el.pageInput.max = String(doc.pageCount);
   el.chipPage.textContent = `第 1 页 / ${doc.pageCount}`;
   saveLocal('lastDoc', doc.docId);
   el.docSelect.value = doc.docId;
+  // 连续滚动：一次性铺好所有页的占位（尺寸来自元数据），内容按需懒加载
+  viewer.setDocument(doc);
   syncUrl();
 }
 
@@ -356,44 +368,65 @@ async function loadDocument(docId, { keepPage = false } = {}) {
 }
 
 // ======================================================================
-// 分页
+// 分页（连续滚动：所有页纵向堆叠，「翻页」= 滚动定位到目标页）
 // ======================================================================
 async function gotoPage(pageNo, { fitWidth = false } = {}) {
   if (!state.doc) return;
   const total = state.doc.pageCount;
   const n = Math.max(1, Math.min(total, Math.round(pageNo) || 1));
-  setStatus(`正在加载第 ${n} 页……`);
-  let data;
-  try {
-    data = await api.getPage(state.doc.docId, n);
-  } catch (err) {
-    showError(`第 ${n} 页加载失败`, err.detail || err.message);
-    setStatus('页面加载失败');
+  if (fitWidth || loadLocal('scale', 0) === 0) viewer.fitWidth();
+  viewer.scrollToPage(n);
+  applyCurrentPage(n);
+}
+
+/** 依据"当前页"刷新页码芯片、右栏提示、进度与地址栏（滚动时也会调用） */
+function applyCurrentPage(n) {
+  if (!state.doc) return;
+  const total = state.doc.pageCount;
+  state.page = n;
+  el.pageInput.value = String(n);
+  el.chipPage.textContent = `第 ${n} 页 / ${total}`;
+  el.rangeInput.placeholder = `页码范围，如 ${n}-${Math.min(total, n + 9)}`;
+  el.zoomRange.value = String(viewer.scale);
+  el.zoomLabel.textContent = `${Math.round(viewer.scale * 100)}%`;
+  syncUrl();
+
+  const data = state.pages.get(n);
+  if (!data) {
+    state.pageData = null;
+    state.baseHint = `第 ${n} 页（正在加载…）`;
+    state.fitInfo = null;
+    renderFitHint();
+    setStatus(`正在加载第 ${n} 页……`);
     return;
   }
-  state.page = n;
   state.pageData = data;
   state.baseHint = pageHint(data);
-  state.fitInfo = null;
-  viewer.setPage(data);                       // 内部 layout 会触发 onFit → 刷新右栏提示
-  if (fitWidth || loadLocal('scale', 0) === 0) viewer.fitWidth();
-  el.pageInput.value = String(n);
-  el.rangeInput.placeholder = `页码范围，如 ${n}-${Math.min(total, n + 9)}`;
-  el.chipPage.textContent = `第 ${n} 页 / ${total}`;
-  const s = viewer.scale;
-  el.zoomRange.value = String(s);
-  el.zoomLabel.textContent = `${Math.round(s * 100)}%`;
-  el.scrollLeft.scrollTop = 0;
-  el.scrollRight.scrollTop = 0;
   renderFitHint();
   const st = data.stats;
   setProgress(st.translatedRatio);
-  syncUrl();
   setStatus(
     `第 ${n} 页：${st.blocks} 个片段（可译 ${st.translatable}，已译 ${st.translated}`
     + `；原样保留 ${data.regions?.length || 0} 个图表区域、${st.formulas} 个公式）`,
   );
-  hidePopover();
+}
+
+/**
+ * 重新取回若干页的数据并就地刷新（翻译完成 / 换模型后需要）：
+ * 只刷新"已经渲染过"的页，避免无谓请求；滚动位置与已加载的其它页不受影响。
+ */
+async function refreshPages(pageNos = null) {
+  if (!state.doc) return;
+  const list = pageNos && pageNos.length ? pageNos : viewer.renderedPages();
+  for (const n of list) {
+    if (!state.doc) break;
+    try {
+      const data = await api.getPage(state.doc.docId, n);
+      state.pages.set(n, data);
+      viewer.refreshPage(n, data);
+    } catch { /* 单页失败不影响其它页 */ }
+  }
+  applyCurrentPage(state.page);
 }
 
 const nextPage = (d) => gotoPage(state.page + d);
@@ -403,9 +436,11 @@ const prevPage = () => gotoPage(state.page - 1);
 // 翻译
 // ======================================================================
 async function autoPreview() {
-  if (!state.doc || !state.pageData) return;
-  const st = state.pageData.stats;
-  if (st.translated > 0 || st.translatable === 0) return;
+  if (!state.doc) return;
+  let data;
+  try { data = await getPageData(state.page); } catch { return; }
+  const st = data?.stats;
+  if (!st || st.translated > 0 || st.translatable === 0) return;
   setStatus('正在翻译本页作为预览……');
   await startTranslate(String(state.page), false, { silent: true });
 }
@@ -440,7 +475,7 @@ function watchJob(jobId) {
   );
 }
 
-function onJobSnapshot(snap) {
+async function onJobSnapshot(snap) {
   state.job = snap;
   const t = snap.totals;
   const ratio = t.blocks ? t.translated / t.blocks : 0;
@@ -462,8 +497,10 @@ function onJobSnapshot(snap) {
       const first = snap.errors?.[0];
       showError('翻译失败', first ? `${first.error}${first.detail ? `\n${first.detail}` : ''}` : '未知错误');
     }
-    // 刷新当前页译文
-    gotoPage(state.page);
+    // 刷新"本次翻译涉及、且已渲染"的页面译文（其它页不重复请求）
+    const rendered = new Set(viewer.renderedPages());
+    const touched = (snap.pages || []).filter((p) => rendered.has(p));
+    await refreshPages(touched.length ? touched : [state.page]);
   } else if (snap.errors?.length) {
     const first = snap.errors[snap.errors.length - 1];
     setStatus(`翻译中（有片段失败）：${first.error}`);
@@ -677,7 +714,7 @@ async function saveSettings() {
     toast(modelChanged ? '设置已保存，换模型后请重新翻译' : '设置已保存并生效', 'ok');
     if (r.warnings?.length) showError('配置提醒', r.warnings.join('；'));
     else clearError();
-    if (modelChanged && state.doc) await gotoPage(state.page);
+    if (modelChanged && state.doc) await refreshPages();
   } catch (err) {
     cfgStatus(`保存失败：${err.message}${err.detail ? `\n\n${err.detail}` : ''}`, 'err');
   } finally {
@@ -889,7 +926,8 @@ function bindUI() {
     clearTimeout(timer);
     timer = setTimeout(() => {
       if (!state.doc) return;
-      if (Math.abs(viewer.scale - viewer.viewportSize.width / viewer.page.width) < 0.02) viewer.fitWidth();
+      const size = viewer.pageSize;
+      if (size && Math.abs(viewer.scale - viewer.viewportSize.width / size.width) < 0.02) viewer.fitWidth();
     }, 160);
   });
 }

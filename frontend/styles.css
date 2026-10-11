@@ -201,8 +201,18 @@ button { font-family: inherit; }
 .pane-hint { color: var(--text-3); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 
 .pane-scroll { flex: 1 1 auto; overflow: auto; background: #eceef1; position: relative; }
-/* 底部多留一块空白：底部悬浮控制台（翻页 / 缩放）不会永久挡住页面最后一行 */
-.stage-wrap { display: flex; justify-content: center; padding: 12px 12px 56px; min-height: 100%; }
+/* 连续滚动：所有页面在本列里纵向堆叠，滚轮往下即下一页。
+   底部多留一块空白，避免悬浮控制台（翻页 / 缩放）永久挡住最后一页的最后一行。 */
+.page-stack {
+  position: relative;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 14px;
+  padding: 12px 12px 56px;
+  min-height: 100%;
+}
+.page-slot { display: block; }
 
 .divider {
   width: 6px; cursor: col-resize; flex: 0 0 6px;
@@ -216,7 +226,6 @@ button { font-family: inherit; }
   background: #fff;
   box-shadow: var(--shadow);
   flex: 0 0 auto;
-  align-self: flex-start;
 }
 .page-image {
   position: absolute; inset: 0;
@@ -225,10 +234,10 @@ button { font-family: inherit; }
   user-select: none;
   -webkit-user-drag: none;
 }
-/* 原图底衬：默认淡显（仅作参考）；「原图底衬」模式（body.original-base）下全不透明，
-   因为右栏就是靠它把图片 / 表格 / 公式原样呈现出来的。 */
-.page-image.underlay { opacity: .13; pointer-events: none; }
-body.original-base .page-image.underlay { opacity: 1; }
+/* 右栏底衬（原页渲染图）：默认隐藏，只显示译文；
+   「原图底衬」（body.original-base）下才显示——图片 / 表格 / 公式靠它原样呈现。 */
+.page-image.underlay { pointer-events: none; display: none; }
+body.original-base .page-image.underlay { display: block; opacity: 1; }
 
 .overlay { position: absolute; inset: 0; cursor: crosshair; }
 
