@@ -508,8 +508,10 @@ def stage_regions(report: Report, settings, tmp: Path) -> None:
     maker = load_module(ROOT / "tools" / "make_sample_pdf.py", "make_sample_pdf")
     from backend.pdf_parser import (
         _overlap_ratio,
+        _table_row_count,
         absorb_region,
         caption_kind_of,
+        is_table_like_lines,
         is_translatable_kind,
         parse_pdf,
     )
@@ -571,6 +573,33 @@ def stage_regions(report: Report, settings, tmp: Path) -> None:
                  f"表内 {len(inside_tbl)} 块，可译 {sum(1 for b in inside_tbl if b['translatable'])}")
     report.check("表格下方正文段落仍可翻译",
                  any(b["translatable"] and b["text"].startswith("The comparison above") for b in pg2["blocks"]))
+
+    # 表格内容必须带 table 标记：右栏据此把整张表透出原件，而不是把表格文字当段落翻出来。
+    # 表题要排除——标题有自己的开关（「翻译图表标题」），不能一并锁死。
+    tbl_content = [b for b in inside_tbl if b["kind"] != "caption"]
+    tbl_caps = [b for b in inside_tbl if b["kind"] == "caption"]
+    report.check("表格内容带 table 标记（右栏整表透出原件），表题不受影响",
+                 len(tbl_content) >= 1 and all(b.get("table") for b in tbl_content)
+                 and all(not b.get("table") for b in tbl_caps),
+                 f"内容 {sum(1 for b in tbl_content if b.get('table'))}/{len(tbl_content)} 带标记，"
+                 f"表题 {len(tbl_caps)} 个未带标记")
+
+    # 判据单测：解析器把每个「单元格」当成一条行，因此「同一 y 上并排 ≥3 个片段」
+    # 才是表格行的指纹。整张表被 PyMuPDF 并成一个文本块时，只有这条判据认得出来。
+    tbl_lines = [
+        {"bbox": [10, 100, 20, 108]}, {"bbox": [30, 100, 40, 108]}, {"bbox": [50, 100, 60, 108]},
+        {"bbox": [10, 110, 20, 118]}, {"bbox": [30, 110, 40, 118]}, {"bbox": [50, 110, 60, 118]},
+        {"bbox": [10, 120, 20, 128]}, {"bbox": [30, 120, 40, 128]}, {"bbox": [50, 120, 60, 128]},
+    ]
+    prose_lines = [
+        {"bbox": [10, 100, 200, 110]}, {"bbox": [10, 112, 200, 122]}, {"bbox": [10, 124, 200, 134]},
+    ]
+    report.check("表格行判据：同一 y 并排 ≥3 片段才算表格行（整表一块也认得出，正文不误判）",
+                 _table_row_count([10, 100, 60, 128], tbl_lines) == 3
+                 and is_table_like_lines([10, 100, 60, 128], tbl_lines)
+                 and not is_table_like_lines([10, 96, 200, 138], prose_lines),
+                 f"表格行 {_table_row_count([10, 100, 60, 128], tbl_lines)} 条；"
+                 f"正文误判={is_table_like_lines([10, 96, 200, 138], prose_lines)}")
 
     # ---------------- 判据单测 ----------------
     cap_cases = {

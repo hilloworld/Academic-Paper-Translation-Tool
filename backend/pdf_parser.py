@@ -80,6 +80,9 @@ VISUAL_CAPTION_GAP = 26.0  # 图块 / 表格行与 caption 之间允许的最大
 TABLE_ROW_GAP = 18.0       # 表格行块之间允许的最大竖直间距
 TABLE_ROW_SPACING = 9.5    # 行距超过它视为正文行，表格聚类到此为止
 TABLE_ROW_MAX_CHARS = 400  # 单行超过这么多字符也不像表格行
+COL_BAND_PT = 4.0          # 同一 y 上下 ±这么宽的片段，算作「同一表格行」
+COL_BAND_MIN = 3           # 一行里至少这么多并排片段，才算「表格行」
+COL_MIN_ROWS = 3           # 块内至少这么多表格行 → 整块判为表格内容
 TABLE_CELL_MAX_CHARS = 150  # 超过这么多字符的"单元格"判为长句，放回普通块照常翻译
 MIN_REGION_RATIO = 0.012          # 最终保留区域的最小面积占比
 MAX_REGION_RATIO = 0.62           # 过大（几乎整页）的区域判为误检，丢弃
@@ -1019,13 +1022,48 @@ def _is_real_table(table: dict, blocks: list[dict], regions: list[dict]) -> bool
     return any(_overlap_ratio(t_box, r["bbox"]) >= 0.5 for r in regions)
 
 
-def _table_row_boxes(cap_box: list[float], blocks: list[dict], seed: list[list[float]]) -> list[list[float]]:
-    """无框线表格兜底：把标题下方「行距明显更紧」的文本块聚成表格区域。
+def _table_row_count(box: list[float], lines: list[dict]) -> int:
+    """块内「表格行」的条数：同一 y 上并排着 ≥``COL_BAND_MIN`` 个文本片段的那些行。
+
+    解析器把每个**单元格**当成一条"行"（同一表格行的多个格子 y 相同、x 分开），
+    因此"同一 y 上并排多个片段"正是表格行的指纹；正文一行只会有一个片段
+    （行内公式的碎片也被缝进同一行里）。实测某对比表每个表格行并排 9 个片段，
+    而同一页的所有正文块一律是 1 个——这是把「整张表被并成一个文本块」从正文里
+    认出来的**唯一稳的判据**：那张表的行距 9.25pt 与正文 9.5pt 只差 0.25pt，
+    文本长度又超过 ``TABLE_ROW_MAX_CHARS``，靠行距/长度都判不出来（踩过）。
+    """
+    bands: dict[int, int] = {}
+    for ln in lines:
+        if not _center_inside(ln["bbox"], box):
+            continue
+        k = int(round(ln["bbox"][1] / COL_BAND_PT))
+        bands[k] = bands.get(k, 0) + 1
+    return sum(1 for n in bands.values() if n >= COL_BAND_MIN)
+
+
+def is_table_like_lines(box: list[float], lines: list[dict]) -> bool:
+    """块内有足够多的「表格行」→ 判为表格内容（而不是正文段落）。"""
+    return _table_row_count(box, lines) >= COL_MIN_ROWS
+
+
+def _table_row_boxes(
+    cap_box: list[float],
+    blocks: list[dict],
+    seed: list[list[float]],
+    lines: list[dict],
+) -> list[list[float]]:
+    """无框线表格兜底：把标题下方「属于表格」的文本块聚成表格区域。
 
     booktabs 风格的表格常常没有完整框线，``find_tables`` 检测不出来（实测
     有一篇论文的两张对比表就是），这些表的每一行会被当成普通正文送去翻译，
-    表格结构荡然无存。判断依据是行距：正文行距通常在 9.5pt 以上，表格行距
-    只有 4–8pt；一旦遇到正文行就立刻停止，绝不把整段正文卷进来。
+    表格结构荡然无存。两条判据，任一命中即视为表格行：
+
+    * **多列排布**（``is_table_like_lines``）：一行里有多个列分隔。这是主判据——
+      整张表被 PyMuPDF 并成一个文本块时，文本会远超 ``TABLE_ROW_MAX_CHARS``、
+      行距也可能和正文只差零点几磅，只有"多列"这一点是稳的（踩过）。
+    * **行距紧 + 文本短**：兜住那些没有明显列分隔的表格行。
+
+    一旦遇到两条都不满足的块（正文段落）就立刻停止，绝不把正文卷进来。
     """
     cur = _union([cap_box] + seed) if seed else list(cap_box)
     picked: list[list[float]] = []
@@ -1035,6 +1073,10 @@ def _table_row_boxes(cap_box: list[float], blocks: list[dict], seed: list[list[f
         if bb[1] < cap_box[1] - 2 or not _x_overlap(bb, cap_box):
             continue
         if bb[1] - cur[3] > TABLE_ROW_GAP:
+            continue
+        if is_table_like_lines(bb, lines):
+            picked.append(bb)
+            cur = _union([cur, bb])
             continue
         spacing = (bb[3] - bb[1]) / max(1, blk.get("line_count", 1))
         if spacing > TABLE_ROW_SPACING or len(blk.get("text", "")) > TABLE_ROW_MAX_CHARS:
@@ -1048,6 +1090,7 @@ def build_regions(
     page: fitz.Page,
     blocks: list[dict],
     tables: list[dict],
+    lines: list[dict],
 ) -> list[dict]:
     """推导本页的「保留区域」：图片（含矢量插图）与表格。
 
@@ -1101,8 +1144,8 @@ def build_regions(
                     best, best_gap = t, g
             if best is not None:
                 cluster.append(list(best["bbox"]))
-            # 无框线表格（booktabs 风格）常检测不出来：用「行距紧 + 与标题同栏」补上
-            cluster.extend(_table_row_boxes(cap_box, blocks, cluster))
+            # 无框线表格（booktabs 风格）常检测不出来：用「行距紧 / 多列排布 + 与标题同栏」补上
+            cluster.extend(_table_row_boxes(cap_box, blocks, cluster, lines))
             # 表格内容都是文本，不再向图块生长——否则会把紧随其后的插图卷进来
             candidates: list[list[float]] = []
         else:
@@ -1228,7 +1271,7 @@ def parse_pdf(
 
             # 2) 推导「保留区域」（图片 / 表格）。落在区域内的文字随之不翻译，
             #    否则译出来的中文会盖在图上（图里的 Power / Control 等标签）。
-            regions = build_regions(page, raw_blocks, tables)
+            regions = build_regions(page, raw_blocks, tables, all_lines)
             for i, r in enumerate(regions):
                 r["index"] = i
 
@@ -1252,7 +1295,14 @@ def parse_pdf(
                 if b["caption_kind"]:
                     b["kind"] = "caption"
                 elif region and b["kind"] == "text":
-                    b["kind"] = region["type"]  # 图内文字标签 → figure
+                    b["kind"] = region["type"]  # 图内文字标签 → figure；表格内容 → table
+                # 表格区域内的块 = 表格内容：打上 table 标记，默认不翻译、右栏直接透出原表
+                # （否则整张表会被拼成一段话送去翻译，右栏变成一团连续文字——踩过）。
+                # **图/表标题要排除**：标题有自己的开关（「翻译图表标题」），不能一并锁死。
+                if not b["caption_kind"] and (
+                    b["kind"] == "table" or (region and region["type"] == "table")
+                ):
+                    b["table"] = True
                 return b
 
             # 表格区域内的原始文本块交给表格逻辑重新分组，
