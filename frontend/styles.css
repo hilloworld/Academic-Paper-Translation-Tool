@@ -64,8 +64,10 @@ button { font-family: inherit; }
 
 .group { display: flex; align-items: center; gap: 6px; }
 .group.brand { gap: 8px; }
-.group.zoom { flex: 1 1 auto; }
-.group.zoom input[type="range"] { max-width: 130px; }
+/* 工具条内分组：靠中间的弹性占位把「翻译 / 视图」两组推到右侧，
+   组之间用一条细竖线分隔，视觉上分成「文档 / 翻译 / 视图」三块 */
+.tb-spacer { flex: 1 1 auto; }
+.tb-vsep { width: 1px; align-self: stretch; min-height: 16px; background: var(--border); flex: 0 0 1px; }
 
 .logo {
   display: inline-flex;
@@ -119,6 +121,25 @@ button { font-family: inherit; }
 .chk { display: inline-flex; align-items: center; gap: 4px; color: var(--text-2); cursor: pointer; user-select: none; }
 .chk input[type="range"] { width: 72px; }
 .zoom-label { min-width: 42px; text-align: right; color: var(--text-2); font-variant-numeric: tabular-nums; }
+
+/* ---------------- 悬浮控制台（底部居中：翻页 / 右下角：缩放） --------- */
+.dock {
+  position: fixed;
+  z-index: 40;
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 5px 8px;
+  border: 1px solid var(--border-strong);
+  border-radius: 999px;
+  background: rgba(255, 255, 255, .93);
+  backdrop-filter: blur(6px);
+  box-shadow: 0 6px 20px rgba(16, 24, 40, .16);
+}
+.pager-dock { left: 50%; bottom: 14px; transform: translateX(-50%); }
+.zoom-dock { right: 14px; bottom: 14px; }
+.pager-box { display: inline-flex; align-items: center; gap: 4px; }
+.zoom-dock input[type="range"] { width: 104px; }
 
 /* ---------------- 状态栏 ---------------- */
 .statusbar {
@@ -180,7 +201,8 @@ button { font-family: inherit; }
 .pane-hint { color: var(--text-3); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 
 .pane-scroll { flex: 1 1 auto; overflow: auto; background: #eceef1; position: relative; }
-.stage-wrap { display: flex; justify-content: center; padding: 12px; min-height: 100%; }
+/* 底部多留一块空白：底部悬浮控制台（翻页 / 缩放）不会永久挡住页面最后一行 */
+.stage-wrap { display: flex; justify-content: center; padding: 12px 12px 56px; min-height: 100%; }
 
 .divider {
   width: 6px; cursor: col-resize; flex: 0 0 6px;
@@ -331,7 +353,8 @@ body.original-base .tblock.empty::after { content: none; }
 .pop-text { white-space: pre-wrap; word-break: break-word; font-size: 13px; }
 .pop-text[dir="auto"]:lang(en) { font-family: Georgia, "Times New Roman", serif; }
 
-.toast-wrap { position: fixed; right: 16px; bottom: 16px; display: flex; flex-direction: column; gap: 8px; z-index: 80; }
+/* 抬到右下角缩放控制台之上，避免被压住 */
+.toast-wrap { position: fixed; right: 16px; bottom: 68px; display: flex; flex-direction: column; gap: 8px; z-index: 80; }
 .toast {
   min-width: 200px; max-width: 380px;
   padding: 8px 12px; border-radius: var(--radius);

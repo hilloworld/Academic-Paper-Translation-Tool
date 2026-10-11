@@ -22,14 +22,7 @@
     <span id="doc-name" class="doc-name">拖拽 PDF 到页面任意位置也可打开</span>
   </div>
 
-  <div class="group pager" title="翻页（← → 键）">
-    <button id="btn-first" class="btn icon" title="第一页">⏮</button>
-    <button id="btn-prev" class="btn icon" title="上一页">◀</button>
-    <input id="page-input" class="page-input" type="number" min="1" value="1" autocomplete="off">
-    <span id="page-total" class="muted">/ 0</span>
-    <button id="btn-next" class="btn icon" title="下一页">▶</button>
-    <button id="btn-last" class="btn icon" title="最后一页">⏭</button>
-  </div>
+  <span class="tb-spacer"></span>
 
   <div class="group">
     <input id="range-input" class="range-input" placeholder="页码范围，如 1-14" title="留空 = 全部页面" autocomplete="off" spellcheck="false">
@@ -39,23 +32,16 @@
     <button id="btn-cancel" class="btn danger hidden">取消</button>
   </div>
 
-  <div class="group zoom" title="缩放（+ / - 键，Ctrl+滚轮）">
-    <button id="btn-zoom-out" class="btn icon">−</button>
-    <input type="range" id="zoom-range" min="0.4" max="3.5" step="0.01" value="1">
-    <button id="btn-zoom-in" class="btn icon">＋</button>
-    <span id="zoom-label" class="zoom-label">100%</span>
-    <button id="btn-fit-width" class="btn sm" title="快捷键 0">适应宽度</button>
-    <button id="btn-fit-page" class="btn sm" title="快捷键 9">整页</button>
-    <button id="btn-zoom-reset" class="btn sm" title="快捷键 8">100%</button>
-  </div>
-
   <div class="group">
     <label class="chk" title="译文字号倍数">字号
       <input type="range" id="font-range" min="0.6" max="1.8" step="0.05" value="1">
     </label>
     <button id="btn-layout" class="btn sm" title="切换「左右对照 / 仅原文」">左右对照</button>
+    <span class="tb-vsep"></span>
+    <label class="chk" title="勾选后，鼠标指向页面时左右两栏同步高亮同一片段并显示十字定位线；不勾选则悬停完全不打扰——但点击片段仍会弹出原文 / 译文对照详情"><input type="checkbox" id="chk-highlight">高亮跟随鼠标</label>
     <label class="chk" title="右栏以原页图为底：图片 / 表格 / 公式原样显示，只有译文片段用白底覆盖（推荐开启）"><input type="checkbox" id="chk-underlay" checked>原图底衬</label>
     <label class="chk" title="不自动缩字：译文按原字号完整铺开（可能压住下方片段）。默认关闭时程序会缩字 / 借用空白以尽量贴回原块"><input type="checkbox" id="chk-overflow">溢出全文</label>
+    <span class="tb-vsep"></span>
     <button id="btn-settings" class="btn sm accented" title="配置翻译服务：服务商 / Base URL / 模型 / API Key（无需改代码）">⚙ 设置</button>
     <button id="btn-help" class="btn sm">? 帮助</button>
   </div>
@@ -75,7 +61,7 @@
   <section class="pane" id="pane-left">
     <div class="pane-head">
       <span class="pane-title">原文 · 英文</span>
-      <span class="pane-hint">悬停/点击任意位置 → 右侧同坐标中文片段高亮</span>
+      <span class="pane-hint">点击任意位置 → 查看该片段的原文 / 译文对照</span>
     </div>
     <div class="pane-scroll" id="scroll-left">
       <div class="stage-wrap">
@@ -111,6 +97,29 @@
   </section>
 </main>
 
+<!-- 悬浮控制台：翻页移到底部居中，缩放放到右下角，操作不必再跑到顶部工具栏 -->
+<div class="dock pager-dock" title="翻页（← → 键）">
+  <button id="btn-first" class="btn icon" title="第一页">⏮</button>
+  <button id="btn-prev" class="btn icon" title="上一页">◀</button>
+  <span class="pager-box">
+    <input id="page-input" class="page-input" type="number" min="1" value="1" autocomplete="off">
+    <span id="page-total" class="muted">/ 0</span>
+  </span>
+  <button id="btn-next" class="btn icon" title="下一页">▶</button>
+  <button id="btn-last" class="btn icon" title="最后一页">⏭</button>
+</div>
+
+<div class="dock zoom-dock" title="缩放（+ / - 键，Ctrl+滚轮）">
+  <button id="btn-zoom-out" class="btn icon" title="缩小">−</button>
+  <input type="range" id="zoom-range" min="0.4" max="3.5" step="0.01" value="1">
+  <button id="btn-zoom-in" class="btn icon" title="放大">＋</button>
+  <span id="zoom-label" class="zoom-label">100%</span>
+  <span class="tb-vsep"></span>
+  <button id="btn-fit-width" class="btn sm" title="适应宽度（快捷键 0）">适应宽度</button>
+  <button id="btn-fit-page" class="btn sm" title="整页（快捷键 9）">整页</button>
+  <button id="btn-zoom-reset" class="btn sm" title="100%（快捷键 8）">100%</button>
+</div>
+
 <div id="drop-hint" class="drop-hint hidden">松开鼠标即可打开 PDF</div>
 <div id="toast-wrap" class="toast-wrap"></div>
 
@@ -135,9 +144,12 @@
     <li>点击「打开 PDF」导入英文论文（也可以直接把文件拖到页面上）。</li>
     <li>首次使用请点工具栏的「⚙ 设置」填写<b>服务商、Base URL、模型名、API Key</b>，点「测试连接」确认可用后保存。</li>
     <li>左侧是按页渲染的<b>原文图像</b>（公式、图表、排版完全不变）；右侧是同一页的<b>中文译文层</b>。</li>
+    <li><b>页面底部正中</b>是翻页按钮，<b>右下角</b>是缩放控件（适应宽度 / 整页 / 100%），
+      阅读时不必再把手移到顶部工具栏。</li>
     <li><b>图片、表格、公式、参考文献一律不翻译</b>：右侧以原页图为底，这些区域原样呈现，
-      只有可译的正文段落才用白底中文覆盖上去；鼠标移到图上时右侧会浮出虚线框，提示"这块按设定保留原文"。</li>
-    <li>鼠标在左侧移动 / 点击时，右侧同坐标的片段会同步高亮定位（译文块或保留区域），点击可自动滚动定位。</li>
+      只有可译的正文段落才用白底中文覆盖上去；勾选「高亮跟随鼠标」后，鼠标移到图上时右侧会浮出虚线框，提示"这块按设定保留原文"。</li>
+    <li>勾选工具栏的<b>「高亮跟随鼠标」</b>后，鼠标在页面移动时左右两栏会同步高亮同一片段并显示十字定位线；
+      不勾选则悬停完全不打扰。<b>点击</b>片段始终会弹出原文 / 译文对照详情，并自动滚动定位到右侧对应位置。</li>
     <li>点「翻译」翻译指定页码，「全部」翻译整篇；已翻译内容写入本地缓存，二次打开不再调用 API。</li>
     <li>未翻译的正文片段显示为虚线空框（此时下方透出的就是原英文）；翻译完成后即被中文覆盖。</li>
     <li><b>想让表格 / 图表标题也翻译？</b>在「⚙ 设置」里勾选「翻译表格内容」「翻译图表标题」即可（立即生效，无需重新解析）。</li>

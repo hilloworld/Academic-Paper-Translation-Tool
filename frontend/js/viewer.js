@@ -35,6 +35,7 @@ export class Viewer {
     this.strict = true;
     this.overflowMode = false;   // false = 按可用高度自动缩字（缩不下才向下延展）；true = 不缩字，完整显示
     this.showUnderlay = true;    // 原图底衬：右栏是否以原页图为底（默认开）
+    this.hoverHighlight = false; // 鼠标悬停是否联动高亮（默认关：路过页面时不打扰）
     this.activeId = null;
     this.blockEls = new Map();   // blockId -> {hit, tblock, preserve}
     this.regionEls = new Map();  // regionIndex -> {hit, el}
@@ -48,17 +49,26 @@ export class Viewer {
     const { overlayLeft, scrollLeft, scrollRight, transLayer } = this.el;
 
     overlayLeft.addEventListener('mousemove', (ev) => this._onPointerMove(ev, 'left'));
-    overlayLeft.addEventListener('mouseleave', () => { this._clearMarker(); this.highlight(null); });
+    overlayLeft.addEventListener('mouseleave', () => {
+      if (!this.hoverHighlight) return;
+      this._clearMarker();
+      this.highlight(null);
+    });
     overlayLeft.addEventListener('click', (ev) => {
       const blk = this._onPointerMove(ev, 'left', true);
       if (blk) this.hooks.onSelect?.(blk, ev);
     });
 
     transLayer.addEventListener('mousemove', (ev) => {
+      if (!this.hoverHighlight) return;
       const id = ev.target?.dataset?.id;
       if (id) { const blk = this.block(id); if (blk) { this.highlight(id); this._setMarker(blk, 'right'); } }
     });
-    transLayer.addEventListener('mouseleave', () => { this._clearMarker(); this.highlight(null); });
+    transLayer.addEventListener('mouseleave', () => {
+      if (!this.hoverHighlight) return;
+      this._clearMarker();
+      this.highlight(null);
+    });
     transLayer.addEventListener('click', (ev) => {
       const id = ev.target?.dataset?.id;
       if (id) { const blk = this.block(id); if (blk) this.hooks.onSelect?.(blk, ev); }
@@ -630,6 +640,15 @@ export class Viewer {
     document.body.classList.toggle('original-base', this.showUnderlay);
   }
 
+  /**
+   * 悬停是否联动高亮。默认**关闭**：鼠标只是路过页面时不产生任何视觉变化；
+   * 勾选工具栏「高亮跟随鼠标」后才恢复原来的同步定位（两栏同亮 + 十字线）。
+   */
+  setHoverHighlight(v) {
+    this.hoverHighlight = !!v;
+    if (!this.hoverHighlight) { this.highlight(null); this._clearMarker(); }
+  }
+
   // ---------------------------------------------------------------- 高亮
   highlight(id) {
     if (this.activeId === id) return;
@@ -684,9 +703,16 @@ export class Viewer {
     const ptX = px / this.scale;
     const ptY = py / this.scale;
     const blk = this._hitTest(ptX, ptY);
-    if (!blk) { if (!select) { this.highlight(null); this._clearMarker(); } return null; }
-    this.highlight(blk.id);
-    this._setMarker(blk, pane, px, py);
+    if (!blk) {
+      if (!select && this.hoverHighlight) { this.highlight(null); this._clearMarker(); }
+      return null;
+    }
+    // 只有勾选「高亮跟随鼠标」才在指向时高亮 + 画十字线；未勾选则悬停完全静默
+    // （点击命中仍然返回 blk，保证弹详情、滚动定位照常工作）
+    if (this.hoverHighlight) {
+      this.highlight(blk.id);
+      this._setMarker(blk, pane, px, py);
+    }
     return blk;
   }
 

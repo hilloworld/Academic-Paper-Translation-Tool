@@ -32,6 +32,7 @@ const el = {
   chkForce: $('chk-force'),
   chkUnderlay: $('chk-underlay'),
   chkOverflow: $('chk-overflow'),
+  chkHighlight: $('chk-highlight'),
   btnCancel: $('btn-cancel'),
   btnLayout: $('btn-layout'),
   chipModel: $('chip-model'),
@@ -187,6 +188,10 @@ async function boot() {
   const originalBase = loadLocal('originalBase', true);
   el.chkUnderlay.checked = originalBase;
   viewer.setUnderlay(originalBase);
+  // 悬停联动高亮：默认关闭，只有勾了「高亮跟随鼠标」才在鼠标指向时点亮
+  const hoverHighlight = loadLocal('hoverHighlight', false);
+  el.chkHighlight.checked = hoverHighlight;
+  viewer.setHoverHighlight(hoverHighlight);
   if (scale) {
     viewer.setScale(scale);
     el.zoomRange.value = String(scale);
@@ -474,7 +479,8 @@ async function cancelJob() {
 // 弹层
 // ======================================================================
 function showPopover(block, ev) {
-  viewer.highlight(block.id);
+  // 未勾选「高亮跟随鼠标」时不点亮任何东西，只弹详情 + 滚动定位
+  if (viewer.hoverHighlight) viewer.highlight(block.id);
   viewer.revealRight(block.id);
   const kindLabel = {
     figure: '图片区域', table: '表格', formula: '公式',
@@ -757,6 +763,14 @@ function bindUI() {
     setStatus(e.target.checked
       ? '已开启「溢出全文」：不再自动缩字，译文按原字号完整铺开（可能压住下方片段）'
       : '已关闭「溢出全文」：译文优先落进原块（必要时缩字 / 借用下方空白），仍放不下才向下延展');
+  });
+
+  el.chkHighlight.addEventListener('change', (e) => {
+    viewer.setHoverHighlight(e.target.checked);
+    saveLocal('hoverHighlight', e.target.checked);
+    setStatus(e.target.checked
+      ? '已开启「高亮跟随鼠标」：鼠标指向片段时，左右两栏同步高亮同一位置并显示十字定位线'
+      : '已关闭「高亮跟随鼠标」：悬停不再有任何视觉变化，点击片段仍可查看原文 / 译文详情');
   });
 
   el.chipModel.addEventListener('click', () => openSettings());
