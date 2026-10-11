@@ -1,0 +1,240 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>论文 PDF 翻译 · 中英对照阅读器</title>
+<!-- 内联空图标：不写这一行，浏览器会去请求 /favicon.ico 并报一个 404，白白吓人一跳 -->
+<link rel="icon" href="data:,">
+<link rel="stylesheet" href="/static/styles.css">
+</head>
+<body>
+
+<header class="toolbar">
+  <div class="group brand">
+    <span class="logo">译</span>
+    <select id="doc-select" class="doc-select" title="历史文档">
+      <option value="">（未打开文档）</option>
+    </select>
+    <button id="btn-open" class="btn primary-ghost" title="打开本地 PDF">打开 PDF</button>
+    <button id="btn-reparse" class="btn" title="用当前版本的解析器重新解析本文档（解析逻辑升级后需要；译文缓存不受影响）">重新解析</button>
+    <input type="file" id="file-input" accept="application/pdf,.pdf" hidden>
+    <span id="doc-name" class="doc-name">拖拽 PDF 到页面任意位置也可打开</span>
+  </div>
+
+  <div class="group pager" title="翻页（← → 键）">
+    <button id="btn-first" class="btn icon" title="第一页">⏮</button>
+    <button id="btn-prev" class="btn icon" title="上一页">◀</button>
+    <input id="page-input" class="page-input" type="number" min="1" value="1">
+    <span id="page-total" class="muted">/ 0</span>
+    <button id="btn-next" class="btn icon" title="下一页">▶</button>
+    <button id="btn-last" class="btn icon" title="最后一页">⏭</button>
+  </div>
+
+  <div class="group">
+    <input id="range-input" class="range-input" placeholder="页码范围，如 1-14" title="留空 = 全部页面">
+    <button id="btn-translate" class="btn primary" title="翻译指定页（T 键 = 当前页）">翻译</button>
+    <button id="btn-translate-all" class="btn" title="翻译全部页面（A 键）">全部</button>
+    <label class="chk" title="忽略缓存，重新调用模型"><input type="checkbox" id="chk-force">重译</label>
+    <button id="btn-cancel" class="btn danger hidden">取消</button>
+  </div>
+
+  <div class="group zoom" title="缩放（+ / - 键，Ctrl+滚轮）">
+    <button id="btn-zoom-out" class="btn icon">−</button>
+    <input type="range" id="zoom-range" min="0.4" max="3.5" step="0.01" value="1">
+    <button id="btn-zoom-in" class="btn icon">＋</button>
+    <span id="zoom-label" class="zoom-label">100%</span>
+    <button id="btn-fit-width" class="btn sm" title="快捷键 0">适应宽度</button>
+    <button id="btn-fit-page" class="btn sm" title="快捷键 9">整页</button>
+    <button id="btn-zoom-reset" class="btn sm" title="快捷键 8">100%</button>
+  </div>
+
+  <div class="group">
+    <label class="chk" title="译文字号倍数">字号
+      <input type="range" id="font-range" min="0.6" max="1.8" step="0.05" value="1">
+    </label>
+    <button id="btn-layout" class="btn sm" title="切换「左右对照 / 仅原文」">左右对照</button>
+    <label class="chk" title="右栏以原页图为底：图片 / 表格 / 公式原样显示，只有译文片段用白底覆盖（推荐开启）"><input type="checkbox" id="chk-underlay" checked>原图底衬</label>
+    <label class="chk" title="不自动缩字：译文按原字号完整铺开（可能压住下方片段）。默认关闭时程序会缩字 / 借用空白以尽量贴回原块"><input type="checkbox" id="chk-overflow">溢出全文</label>
+    <button id="btn-settings" class="btn sm accented" title="配置翻译服务：服务商 / Base URL / 模型 / API Key（无需改代码）">⚙ 设置</button>
+    <button id="btn-help" class="btn sm">? 帮助</button>
+  </div>
+</header>
+
+<div class="statusbar">
+  <span id="chip-model" class="chip" title="当前翻译服务">模型：--</span>
+  <span id="chip-cache" class="chip" title="本地缓存">缓存：--</span>
+  <span id="chip-page" class="chip">第 0 页</span>
+  <div class="progress" title="翻译进度"><div id="progress-fill"></div></div>
+  <span id="status-text" class="status-text">就绪</span>
+</div>
+
+<div id="error-bar" class="error-bar hidden"><span id="error-text"></span><button id="error-close" class="btn tiny">关闭</button></div>
+
+<main id="viewer" class="viewer">
+  <section class="pane" id="pane-left">
+    <div class="pane-head">
+      <span class="pane-title">原文 · 英文</span>
+      <span class="pane-hint">悬停/点击任意位置 → 右侧同坐标中文片段高亮</span>
+    </div>
+    <div class="pane-scroll" id="scroll-left">
+      <div class="stage-wrap">
+        <div class="stage" id="stage-left">
+          <img id="page-image" class="page-image" alt="原文页面">
+          <div class="overlay" id="overlay-left"></div>
+          <div class="marker" id="marker-left" hidden>
+            <div class="marker-h"></div><div class="marker-v"></div><div class="marker-dot"></div>
+          </div>
+        </div>
+      </div>
+    </div>
+  </section>
+
+  <div class="divider" id="divider" title="拖动调整左右宽度"></div>
+
+  <section class="pane" id="pane-right">
+    <div class="pane-head">
+      <span class="pane-title">译文 · 中文</span>
+      <span class="pane-hint" id="pane-right-hint">未翻译的片段显示为虚线框</span>
+    </div>
+    <div class="pane-scroll" id="scroll-right">
+      <div class="stage-wrap">
+        <div class="stage" id="stage-right">
+          <img id="page-underlay" class="page-image underlay" alt="" hidden>
+          <div class="trans-layer" id="trans-layer"></div>
+          <div class="marker" id="marker-right" hidden>
+            <div class="marker-h"></div><div class="marker-v"></div><div class="marker-dot"></div>
+          </div>
+        </div>
+      </div>
+    </div>
+  </section>
+</main>
+
+<div id="drop-hint" class="drop-hint hidden">松开鼠标即可打开 PDF</div>
+<div id="toast-wrap" class="toast-wrap"></div>
+
+<div id="popover" class="popover hidden">
+  <div class="pop-head">
+    <span id="pop-title">片段详情</span>
+    <span class="pop-actions">
+      <button id="pop-copy-src" class="btn tiny">复制原文</button>
+      <button id="pop-copy-tgt" class="btn tiny">复制译文</button>
+      <button id="pop-close" class="btn tiny">✕</button>
+    </span>
+  </div>
+  <div class="pop-body">
+    <div class="pop-col"><div class="pop-label">原文</div><div id="pop-src" class="pop-text"></div></div>
+    <div class="pop-col"><div class="pop-label">译文</div><div id="pop-tgt" class="pop-text"></div></div>
+  </div>
+</div>
+
+<dialog id="help-dialog">
+  <h3>使用说明与快捷键</h3>
+  <ol class="help-list">
+    <li>点击「打开 PDF」导入英文论文（也可以直接把文件拖到页面上）。</li>
+    <li>首次使用请点工具栏的「⚙ 设置」填写<b>服务商、Base URL、模型名、API Key</b>，点「测试连接」确认可用后保存。</li>
+    <li>左侧是按页渲染的<b>原文图像</b>（公式、图表、排版完全不变）；右侧是同一页的<b>中文译文层</b>。</li>
+    <li><b>图片、表格、公式、参考文献一律不翻译</b>：右侧以原页图为底，这些区域原样呈现，
+      只有可译的正文段落才用白底中文覆盖上去；鼠标移到图上时右侧会浮出虚线框，提示"这块按设定保留原文"。</li>
+    <li>鼠标在左侧移动 / 点击时，右侧同坐标的片段会同步高亮定位（译文块或保留区域），点击可自动滚动定位。</li>
+    <li>点「翻译」翻译指定页码，「全部」翻译整篇；已翻译内容写入本地缓存，二次打开不再调用 API。</li>
+    <li>未翻译的正文片段显示为虚线空框（此时下方透出的就是原英文）；翻译完成后即被中文覆盖。</li>
+    <li><b>想让表格 / 图表标题也翻译？</b>在「⚙ 设置」里勾选「翻译表格内容」「翻译图表标题」即可（立即生效，无需重新解析）。</li>
+    <li><b>译文放不下时怎么办？</b>中文通常比英文长。程序按「真实折行」逐档试算字号：先尽量保持原字号，
+      放不下就向下借用段落之间的空白（那里本来就是空的），还放不下才缩小字号——<b>下限 0.55 倍</b>；
+      缩到下限仍放不下的片段，框会向下延展以保证<b>文字完整显示</b>（可能压住下方片段，会用橙色虚线标出）。
+      勾选工具栏的<b>「溢出全文」</b>则完全不缩字、按原字号完整铺开。右边「本页已译 …」处的提示会告诉你本页有多少处属于这种情况。</li>
+    <li><b>公式嵌在正文里怎么办？</b>程序按字体识别正文中的数学排版（LaTeX 的 Computer Modern 等字体），
+      把它们在送翻译前换成占位符，翻译回来后**在原来的位置贴回公式的原图小块**——所以行内公式永远和原文一模一样，
+      不会被模型改写、也不会被中文盖住；中文会自动绕开它。</li>
+  </ol>
+  <table class="help-table">
+    <tr><td>← / →</td><td>上一页 / 下一页</td></tr>
+    <tr><td>PgUp / PgDn、空格</td><td>左右同步滚动</td></tr>
+    <tr><td>+ / −</td><td>放大 / 缩小（左右等比联动）</td></tr>
+    <tr><td>Ctrl + 滚轮</td><td>以指针为中心缩放</td></tr>
+    <tr><td>0 / 9 / 8</td><td>适应宽度 / 整页 / 100%</td></tr>
+    <tr><td>T / A</td><td>翻译当前页 / 翻译全部</td></tr>
+    <tr><td>Esc</td><td>关闭弹层</td></tr>
+  </table>
+  <button id="help-close" class="btn primary">知道了</button>
+</dialog>
+
+<dialog id="settings-dialog" class="settings-dialog">
+  <h3>翻译服务设置</h3>
+  <p class="cfg-note">
+    在这里填好的配置会写入 <code id="cfg-file">data/runtime-config.json</code>，<b>优先级高于 .env 与环境变量</b>，
+    保存后立即生效、无需重启。点「清除界面设置」即可删除该文件，配置重新回到由 .env 控制。
+    密钥只保存在本机该文件里（位于 <code>data/</code>，已在 .gitignore 中），不会随代码提交。
+  </p>
+
+  <div class="cfg-grid">
+    <label class="cfg-field">服务商
+      <select id="cfg-provider"></select>
+    </label>
+    <label class="cfg-field">模型名
+      <input id="cfg-model" type="text" placeholder="deepseek-chat" spellcheck="false">
+    </label>
+
+    <label class="cfg-field span2">Base URL
+      <input id="cfg-base-url" type="text" placeholder="https://api.deepseek.com/v1" spellcheck="false">
+    </label>
+
+    <label class="cfg-field span2">API Key
+      <span class="cfg-key-row">
+        <input id="cfg-api-key" type="password" placeholder="sk-..." spellcheck="false" autocomplete="off">
+        <button id="cfg-key-toggle" class="btn sm" type="button">显示</button>
+      </span>
+      <span id="cfg-key-hint" class="cfg-hint"></span>
+    </label>
+
+    <label class="cfg-field">温度
+      <input id="cfg-temperature" type="number" step="0.05" min="0" max="2" value="0.2">
+    </label>
+    <label class="cfg-field">并发数
+      <input id="cfg-max-concurrency" type="number" step="1" min="1" max="16" value="4">
+    </label>
+    <label class="cfg-field">源语言
+      <input id="cfg-source-lang" type="text" value="英语">
+    </label>
+    <label class="cfg-field">目标语言
+      <input id="cfg-target-lang" type="text" value="简体中文">
+    </label>
+
+    <label class="cfg-field">页面渲染倍率
+      <input id="cfg-render-zoom" type="number" step="0.5" min="1" max="4" value="2">
+      <span class="cfg-hint">改动需重新导入 PDF 才生效</span>
+    </label>
+    <div class="cfg-field cfg-checks">
+      <label class="chk"><input id="cfg-skip-refs" type="checkbox"> 跳过参考文献</label>
+      <label class="chk"><input id="cfg-translate-formulas" type="checkbox"> 翻译整段公式块</label>
+      <label class="chk" title="默认关闭：右栏原样显示原表格。勾选后按单元格逐个翻译（符号 / 缩写格自动保留原文）——表格排版会被中文替换，通常不推荐。保存后立即生效，无需重新解析。">
+        <input id="cfg-translate-tables" type="checkbox"> 翻译表格内容
+      </label>
+      <label class="chk" title="默认关闭：图题 / 表题（Fig. 1: / TABLE I:）原样保留。勾选后会把标题也翻译成中文。">
+        <input id="cfg-translate-captions" type="checkbox"> 翻译图表标题
+      </label>
+      <label class="chk" title="默认开启：正文里嵌着的行内公式（如 H、t=1、{Et, Dt}）会按原图贴回译文中间，绝不让模型改写公式。改动后含行内公式的段落需重新翻译一次。">
+        <input id="cfg-inline-math" type="checkbox"> 行内公式保留原图
+      </label>
+      <label class="chk" title="不调用真实 API，返回模拟译文，用于先跑通链路">
+        <input id="cfg-mock" type="checkbox"> 模拟模式（不调用 API）
+      </label>
+    </div>
+  </div>
+
+  <div id="cfg-status" class="cfg-status hidden"></div>
+
+  <div class="cfg-actions">
+    <button id="cfg-test" class="btn">测试连接</button>
+    <button id="cfg-save" class="btn primary">保存并应用</button>
+    <span class="cfg-spacer"></span>
+    <button id="cfg-clear" class="btn danger">清除界面设置</button>
+    <button id="cfg-close" class="btn">关闭</button>
+  </div>
+</dialog>
+
+<script type="module" src="/static/js/app.js"></script>
+</body>
+</html>

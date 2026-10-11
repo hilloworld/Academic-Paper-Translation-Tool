@@ -1,0 +1,20 @@
+[project]
+name = "paper-pdf-translator"
+version = "1.0.0"
+description = "英文论文 PDF 翻译 + 中英对照阅读 Web 应用（版式保持 / 坐标对齐 / 本地缓存）"
+readme = "README.md"
+requires-python = ">=3.10"
+license = { text = "MIT" }
+dependencies = [
+    "fastapi>=0.110.0",
+    "uvicorn>=0.27.0",
+    "PyMuPDF>=1.24.0",
+    "requests>=2.31.0",
+]
+
+[project.optional-dependencies]
+dev = ["httpx>=0.27.0"]
+
+[tool.uv]
+# 本工程是「应用」而非「可安装的包」，不需要构建 wheel
+package = false

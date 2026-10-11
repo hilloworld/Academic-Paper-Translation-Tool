@@ -1,0 +1,54 @@
+# ===== 密钥与环境配置 =====
+# 真实密钥只放在 .env（不入库）；.env.example 是模板，需保留
+.env
+.env.*
+!.env.example
+# 旧式本地配置（可能含密钥）
+config.json
+*.local.json
+
+# ===== 运行时数据（上传的 PDF、渲染图、译文缓存、调试产物） =====
+data/
+runtime-config.json
+
+# ===== Python =====
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+.venv/
+venv/
+env/
+build/
+dist/
+*.egg-info/
+*.egg
+pip-wheel-metadata/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.coverage
+htmlcov/
+.tox/
+
+# ===== 前端（本项目前端零依赖、无构建；若日后引入本地依赖再追加） =====
+node_modules/
+*.tsbuildinfo
+
+# ===== 调试 / 日志 =====
+*.log
+debug/
+.cache/
+tmp/
+
+# ===== 编辑器 / 系统 =====
+.vscode/
+.idea/
+*.swp
+*.swo
+.DS_Store
+Thumbs.db
+
+# ===== WorkBuddy 内部数据（非项目源码，含对话/记忆等工具状态） =====
+.workbuddy/
