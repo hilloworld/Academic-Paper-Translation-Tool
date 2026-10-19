@@ -16,7 +16,7 @@ if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
 try:
-    import uvicorn
+    import uvicorn # type: ignore
 except ImportError:  # pragma: no cover
     print("缺少依赖 uvicorn。请先执行：pip install -r requirements.txt", file=sys.stderr)
     raise SystemExit(1)
