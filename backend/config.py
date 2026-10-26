@@ -166,7 +166,7 @@ class Settings:
     translate_formula_blocks: bool = False
     # 表格与图表标题默认**不翻译**：右栏原样显示原表/原图，避免中文盖住版面
     translate_tables: bool = False
-    translate_captions: bool = False
+    translate_captions: bool = True
     # 行内公式（嵌在正文里的公式）默认按原图贴回，不让模型重写
     inline_math_image: bool = True
     # ---- 服务 ----

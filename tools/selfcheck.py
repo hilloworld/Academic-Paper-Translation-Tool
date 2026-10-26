@@ -340,13 +340,31 @@ def stage_stitch(report: Report) -> None:
     # 段落分组：用 core（正文部分）算间距，分式撑高的行不会把两段粘在一起
     tall = row([49.0, 260.2, 300.0, 298.3], "⟦27⟧ across all time slots")
     tall["core"] = [49.0, 260.2, 300.0, 272.0]          # 正文只占上面一半
-    heading = row([49.0, 212.7, 168.0, 222.7], "C. Cross-Layer Optimization")
+    heading = row([49.0, 212.7, 168.0, 222.7], "Cross-Layer Optimization")
     heading["core"] = [49.0, 212.7, 168.0, 222.7]
     first = row([49.0, 228.0, 300.0, 240.0], "Having the communication workload")
     first["core"] = [49.0, 228.0, 300.0, 240.0]
     groups = _group_lines([heading, first, tall])
     report.check("段落分组按正文行间距算（标题/正文不被撑高的公式粘成一段）",
                  len(groups) == 2, f"分了 {len(groups)} 段")
+
+    # 结构断点一：字号变化（标题 → 正文）必须断开，否则标题会被并进正文一起翻译
+    h = row([49.0, 100.0, 200.0, 112.0], "Problem Formulation")
+    h["size"] = 11.96
+    h["spans"] = [{"text": "Problem Formulation", "bbox": list(h["bbox"]), "size": 11.96, "math": False}]
+    body = row([49.0, 116.0, 300.0, 128.0], "We formulate multi-agent embodied coordination")
+    report.check("字号变化处断开（标题不会被吞进正文、跟着一起翻译）",
+                 len(_group_lines([h, body])) == 2,
+                 f"分了 {len(_group_lines([h, body]))} 段")
+
+    # 结构断点二：列表项各自成段（编号项之间只隔 3pt，靠行距分不开）
+    li0 = row([49.0, 140.0, 300.0, 152.0], "puzzle demands:")
+    li1 = row([49.0, 156.0, 300.0, 168.0], "1. Level 1 - One Step Problem: A single clue")
+    li1b = row([60.0, 170.0, 300.0, 182.0], "to the key, requiring minimal inference.")
+    li2 = row([49.0, 184.0, 300.0, 196.0], "2. Level 2 - Sequential Puzzles: Agents must")
+    lg = _group_lines([li0, li1, li1b, li2])
+    report.check("列表项各自成段（悬挂缩进 / 编号开头即断开，不再并成一大段）",
+                 len(lg) == 3, f"分了 {len(lg)} 段")
 
     # 块连通分量：叠在一起的碎片归一个分量；标题与正文分开
     entries = [
@@ -471,8 +489,8 @@ def stage_tables(report: Report, settings, tmp: Path) -> None:
     report.check("表格区域被登记为保留区域（供界面画虚框 / 统计）",
                  any(r["type"] == "table" for r in pg["regions"]),
                  "、".join(f"{r['type']}[{r['bbox'][1]:.0f}~{r['bbox'][3]:.0f}]" for r in pg["regions"]))
-    report.check("表题块被登记为 caption 且不翻译",
-                 any(b["kind"] == "caption" and not b["translatable"] for b in pg["blocks"]),
+    report.check("表题块被登记为 caption（翻译与否由「翻译图表标题」开关决定）",
+                 any(b["kind"] == "caption" for b in pg["blocks"]),
                  "、".join(b["text"][:28] for b in pg["blocks"] if b["kind"] == "caption"))
 
     # 纯函数单测
@@ -536,9 +554,9 @@ def stage_regions(report: Report, settings, tmp: Path) -> None:
                  "、".join(str([round(v) for v in r["bbox"]]) for r in figs) or "（未识别到）")
 
     caps = [b for b in pg1["blocks"] if b["kind"] == "caption"]
-    report.check("图题被识别为 caption 且不翻译",
-                 len(caps) == 1 and not caps[0]["translatable"] and "Fig. 1" in caps[0]["text"],
-                 f"{len(caps)} 个 caption，可译 {sum(1 for b in caps if b['translatable'])}")
+    report.check("图题被识别为 caption（翻译与否由「翻译图表标题」开关决定）",
+                 len(caps) == 1 and "Fig. 1" in caps[0]["text"],
+                 f"{len(caps)} 个 caption")
     report.check("保留区域把图题一起圈进来（图题也原样保留）",
                  bool(caps) and any(_overlap_ratio(caps[0]["bbox"], r["bbox"]) >= 0.9 for r in covers),
                  f"图题 {[round(v) for v in caps[0]['bbox']]}" if caps else "无图题")
@@ -565,11 +583,13 @@ def stage_regions(report: Report, settings, tmp: Path) -> None:
                  + (f"；末行 {[round(v) for v in last_row[0]['bbox']]}" if last_row else "；未找到末行"))
 
     tbl = tabs[0]["bbox"] if tabs else [0, 0, 0, 0]
-    inside_tbl = [b for b in pg2["blocks"] if _overlap_ratio(b["bbox"], tbl) >= 0.6]
+    # 表内「内容」= 表头/数据行；表题（caption）不算内容，它由「翻译图表标题」控制
+    inside_tbl = [b for b in pg2["blocks"]
+                  if b["kind"] != "caption" and _overlap_ratio(b["bbox"], tbl) >= 0.6]
     report.check("表格的表头与数据行全部不可译（整表原样保留）",
-                 len(inside_tbl) >= 2 and all(not b["translatable"] for b in inside_tbl)
+                 len(inside_tbl) >= 1 and all(not b["translatable"] for b in inside_tbl)
                  and any("Loss" in b["text"] for b in inside_tbl)
-                 and any("TABLE I" in b["text"] for b in inside_tbl),
+                 and any("TABLE I" in b["text"] for b in pg2["blocks"] if b["kind"] == "caption"),
                  f"表内 {len(inside_tbl)} 块，可译 {sum(1 for b in inside_tbl if b['translatable'])}")
     report.check("表格下方正文段落仍可翻译",
                  any(b["translatable"] and b["text"].startswith("The comparison above") for b in pg2["blocks"]))
@@ -623,10 +643,12 @@ def stage_regions(report: Report, settings, tmp: Path) -> None:
                  absorb_region({"text": "E. Experiment 5: Power Minimization GSCLO",
                                 "bbox": [110, 150, 300, 162], "line_count": 1}, region, area) is None)
 
-    report.check("figure / table / formula / caption 默认一律不可译",
+    report.check("figure / table / formula 一律不可译；caption 由「翻译图表标题」开关控制",
                  all(is_translatable_kind(k, settings) is False
-                     for k in ("figure", "table", "formula", "caption"))
-                 and is_translatable_kind("text", settings) is True)
+                     for k in ("figure", "table", "formula"))
+                 and is_translatable_kind("text", settings) is True
+                 and is_translatable_kind(
+                     "caption", dataclasses.replace(settings, translate_captions=False)) is False)
     report.check("勾选「翻译图表标题」后 caption 变为可译（运行期生效，无需重新解析）",
                  is_translatable_kind("caption", dataclasses.replace(settings, translate_captions=True)) is True)
 

@@ -241,7 +241,67 @@ def _merge_lines(lines: list[dict]) -> str:
     return _norm_text(out)
 
 
-def _group_lines(lines: list[dict]) -> list[list[dict]]:
+_LIST_MARK_RE = re.compile(r"^(?:\d{1,2}[.)]|\(\d{1,2}\)|\(?[A-Za-z][.)]|[•·▪◦‣])\s+\S")
+_REF_MARK_RE = re.compile(r"^\[\d{1,3}\]\s")
+_SENT_END_RE = re.compile(r"[.:;!?)\]”’]\s*$")
+# 严格的"句子结束"：只认 . ! ?（可带右引号/括号）。跨块接续用它判断是否同段续行
+_SENT_END_STRICT_RE = re.compile(r"[.!?][\"'”’)\]]*\s*$")
+
+
+def _looks_continued(prev_text: str, next_text: str) -> bool:
+    """跨块接续时判断"下一块是不是同一段落的续行"。
+
+    参考文献这类列表里，每一条之间只隔约 1pt，**与段内行距完全一样**，靠间距
+    根本分不开；若一律按间距接续，整页参考文献会被并成一大块（踩过：实测
+    单块从 400 字涨到 4500 字）。因此再叠一条文本判据：上一行没有以句末标点
+    收尾，或下一行以小写字母开头 → 认为是同一段的续行。
+    """
+    p = (prev_text or "").strip()
+    n = (next_text or "").strip()
+    if not p or not n:
+        return False
+    if n[0].islower():
+        return True
+    return not _SENT_END_STRICT_RE.search(p)
+
+
+def _row_style_size(line: dict) -> float:
+    """一行"正文部分"的字号（排除行内公式，避免数学符号把字号抬上去）。"""
+    return float(_row_size([line]) or 0.0)
+
+
+def _style_changed(a: dict, b: dict) -> bool:
+    """相邻两行字号明显不同 → 标题与正文的交界，必须断开。
+
+    标题（实测 11.96pt 粗体）与正文（10.06pt）的行距只有 4pt 左右，只按行距
+    判断一定会并成一段，于是**标题被并进正文、跟着一起翻译**（踩过）。
+    差 1.5pt 或 18% 以上才断；同一段内因行内公式造成的 0.1~0.2pt 抖动不会触发。
+    """
+    sa, sb = _row_style_size(a), _row_style_size(b)
+    if sa <= 0 or sb <= 0:
+        return False
+    hi, lo = max(sa, sb), min(sa, sb)
+    return (hi - lo) >= 1.5 or hi / lo >= 1.18
+
+
+def _is_list_start(line: dict, prev: dict | None) -> bool:
+    """这一行是不是一个新的列表项（``1.`` / ``(a)`` / ``•`` …）。
+
+    列表项之间往往只隔 3pt，靠行距分不开，会把整串列表并成一段（踩过）。
+    只在「上一行以句末标点收尾」时才断，避免正文里以编号开头的续行被误切。
+    """
+    text = (line.get("text") or "").strip()
+    if not _LIST_MARK_RE.match(text):
+        return False
+    if prev is None:
+        return True
+    if _SENT_END_RE.search((prev.get("text") or "").strip()):
+        return True
+    # 悬挂缩进：列表项从更靠左的边界起排，续行通常缩进更深
+    return float(line["bbox"][0]) < float(prev["bbox"][0]) - 4.0
+
+
+def _group_lines(lines: list[dict]) -> list[dict]:
     """按行间垂直间距把块内的行分组为自然段（间距过大视为换段）。
 
     注意：这里**刻意不按水平重叠再切**。公式区域里同一 y 上有大量并列的片段
@@ -250,6 +310,11 @@ def _group_lines(lines: list[dict]) -> list[list[dict]]:
 
     间距用行的 ``core``（正文部分）算而不是整行包围盒：行内分式会把行撑高，
     用整行算间距时会算出负数，隔着两段的行也有可能被并成一段。
+
+    另外两条"结构断点"必须显式判断，光看间距不够：
+
+    * :func:`_style_changed` —— 字号变了（标题 → 正文），否则标题会被吞进正文；
+    * :func:`_is_list_start` —— 新列表项，否则整串列表会被并成一大段。
     """
     if not lines:
         return []
@@ -259,11 +324,63 @@ def _group_lines(lines: list[dict]) -> list[list[dict]]:
     for prev, cur in zip(lines, lines[1:]):
         gap = bound(cur)[1] - bound(prev)[3]
         limit = max(6.0, 0.62 * max(cur.get("size", 10.0), 6.0))
-        if gap > limit:
+        # 列表项内部行距更紧（实测 1pt）；一旦当前段是列表项，稍大的空行（>4.5pt）
+        # 就是"列表结束、进入下一段"，否则最后一项会把后面的正文段落吞掉（踩过）
+        in_list = bool(_LIST_MARK_RE.match((groups[-1][0].get("text") or "").strip()))
+        # 参考文献条目之间只隔约 1pt（与段内行距相同），且 PyMuPDF 的块边界常常
+        # 横跨两条文献；靠间距/接续都分不开，只能认 ``[12]`` 这个条目开头标记。
+        is_ref = bool(_REF_MARK_RE.match((cur.get("text") or "").strip()))
+        if (gap > limit or _style_changed(prev, cur) or _is_list_start(cur, prev)
+                or (in_list and gap > 4.5) or is_ref):
             groups.append([cur])
         else:
             groups[-1].append(cur)
     return groups
+
+
+def _merge_adjacent_streams(streams: list[list[dict]]) -> list[list[dict]]:
+    """把「同一栏、上下紧邻」的分量接成一条流，再统一分段。
+
+    ``_block_components`` 只按**几何重叠**聚块，而 PyMuPDF 经常把**一个段落**拆成
+    好几个互不重叠的块（实测某段被拆成 3 块，还在 ``Euler an- | gles`` 处断成两半）。
+    若仍按分量各自分段，这一段就会被切成 3 段分别翻译、排版错乱（踩过）。
+
+    接续条件：水平投影重叠 ≥ 50%、**宽度相近**（≥60%）、竖直间距 ≤ 段落阈值。
+    宽度必须相近——整页宽的大标题不能和半栏正文接成一条流，否则左右两栏的行
+    会按 y 交错排到一起，整页排版都会乱。
+    """
+    items: list[dict] = []
+    for rows in streams:
+        if rows:
+            ordered = sorted(rows, key=lambda r: ((r.get("core") or r["bbox"])[1], r["bbox"][0]))
+            items.append({"rows": ordered, "bbox": _union([r["bbox"] for r in ordered])})
+    items.sort(key=lambda it: (it["bbox"][1], it["bbox"][0]))
+
+    out: list[dict] = []
+    for it in items:
+        nb = it["bbox"]
+        nw = nb[2] - nb[0]
+        for cur in out:
+            cb = cur["bbox"]
+            cw = cb[2] - cb[0]
+            if cw <= 0 or nw <= 0:
+                continue
+            if min(cw, nw) < 0.6 * max(cw, nw):
+                continue                                   # 宽度差太多：整页标题 vs 半栏正文
+            ov = min(cb[2], nb[2]) - max(cb[0], nb[0])
+            if ov <= 0.5 * min(cw, nw):
+                continue                                   # 不同栏
+            limit = max(6.0, 0.62 * max(_row_style_size(it["rows"][0]), 6.0))
+            if nb[1] - cb[3] > limit:
+                continue                                   # 已换段
+            if not _looks_continued(cur["rows"][-1].get("text"), it["rows"][0].get("text")):
+                continue                                   # 上一块以句末收尾：是新段落（如参考文献每条）
+            cur["rows"].extend(it["rows"])
+            cur["bbox"] = _union([cb, nb])
+            break
+        else:
+            out.append({"rows": list(it["rows"]), "bbox": list(nb)})
+    return [it["rows"] for it in out]
 
 
 # ----------------------------------------------------------------------
@@ -752,8 +869,12 @@ def _extract_page(page: fitz.Page, inline_math: bool = True) -> tuple[list[dict]
 
     blocks: list[dict] = []
     all_rows: list[dict] = []
+    streams: list[list[dict]] = []
     for entry in _block_components(entries):
-        rows = _stitch_rows([ln for e in entry for ln in e["lines"]])
+        streams.append(_stitch_rows([ln for e in entry for ln in e["lines"]]))
+    # 先跨分量接续（PyMuPDF 常把一段拆成好几块），再统一分段；
+    # 否则同一段会被切成几段分别翻译，排版错乱（踩过）。
+    for rows in _merge_adjacent_streams(streams):
         all_rows.extend(rows)
         for group in _group_lines(rows):
             text = _merge_lines(group)
@@ -1181,7 +1302,11 @@ def build_regions(
 
 
 def absorb_region(
-    block: dict, regions: list[dict], page_area: float, page_width: float = 0.0
+    block: dict,
+    regions: list[dict],
+    page_area: float,
+    page_width: float = 0.0,
+    lines: list[dict] | None = None,
 ) -> dict | None:
     """判断一个文本块是否落在某个保留区域内（落入即不翻译）。
 
@@ -1192,6 +1317,11 @@ def absorb_region(
     表格行是这里最容易漏的一类：一行横跨多个单元格，PyMuPDF 会把同一列的
     多行拼成一个块（实测 lineCount 能到 28），因此判据不能只看行数，
     还要看行距——表格行距只有 1–2pt，正文行距 ≥9.5pt。
+
+    **整张三线表被并成一个上千字的长块**时，长度上限（1200 字）与宽度上限
+    （0.75 页宽，通栏表必超）会把它挡在区域外，表格正文于是被逐段翻译、
+    排版全毁（踩过）。这类块有唯一稳的特征——「同一 y 上并排 ≥3 个片段」
+    （:func:`is_table_like_lines`），命中就放行，不再看长短与宽度。
     """
     for r in regions:
         if block.get("caption_kind"):
@@ -1203,8 +1333,8 @@ def absorb_region(
         text = block.get("text", "")
         if _HEADING_RE.match(text):
             continue
-        lines = max(1, int(block.get("line_count", 1) or 1))
-        spacing = (block["bbox"][3] - block["bbox"][1]) / lines
+        n_lines = max(1, int(block.get("line_count", 1) or 1))
+        spacing = (block["bbox"][3] - block["bbox"][1]) / n_lines
         width = block["bbox"][2] - block["bbox"][0]
         if spacing <= 7.5 and len(text) <= 1200 and (not page_width or width <= 0.75 * page_width):
             # 行距很紧 = 表格行 / 刻度簇 / 多行公式碎片，长度放宽
@@ -1212,7 +1342,10 @@ def absorb_region(
             # 宽度限制用于排除"横跨整页的正文块"（PyMuPDF 偶尔把两栏并成一块，
             # 这种块的"行距"会假性偏小，实测在一篇论文的第 13 页出现过）
             return r
-        if lines <= 2 and len(text) <= 200:
+        if spacing <= 7.5 and lines is not None and is_table_like_lines(block["bbox"], lines):
+            # 长/宽都超标，但确是多列排布的表格正文（整表一块）→ 放行
+            return r
+        if n_lines <= 2 and len(text) <= 200:
             # 单行/双行的短标签（图里的 Power / Control / Real State…）
             return r
         if len(text) <= 40:
@@ -1289,7 +1422,7 @@ def parse_pdf(
                 b.setdefault("caption_kind", caption_kind_of(b["text"]))
                 if b["kind"] == "text" and _looks_like_table_block(b, rect.width, page_area):
                     b["kind"] = "table"  # 检测失效时的兜底
-                region = absorb_region(b, regions, page_area, rect.width)
+                region = absorb_region(b, regions, page_area, rect.width, all_lines)
                 b["region_index"] = region["index"] if region else None
                 b["region_type"] = region["type"] if region else None
                 if b["caption_kind"]:

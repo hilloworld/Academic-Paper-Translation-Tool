@@ -121,7 +121,7 @@ uv run python run.py                 # 启动，并自动打开浏览器
 | `SKIP_REFERENCE_BLOCKS` | `1` | 跳过参考文献条目（不翻译，右栏显示原参考文献） |
 | `TRANSLATE_FORMULA_BLOCKS` | `0` | 是否翻译整段公式块（默认 `0`：公式原样保留，右栏显示原公式） |
 | `TRANSLATE_TABLES` | `0` | 表格：`0`=整张表原样保留（默认），`1`=按单元格逐个翻译（符号 / 缩写格仍自动保留原文） |
-| `TRANSLATE_CAPTIONS` | `0` | 图表标题（`Fig. 1:` / `TABLE I:`）：`0`=原样保留（默认），`1`=翻译标题 |
+| `TRANSLATE_CAPTIONS` | `1` | 图表标题（`Fig. 1:` / `TABLE I:`）：`1`=翻译标题（默认），`0`=原样保留 |
 | `INLINE_MATH_IMAGE` | `1` | 行内公式（嵌在正文里的 `x_t`、`\|h_t\|²`、分式…）：`1`=不送模型、按原图贴回原位（默认），`0`=当普通文字一起翻译 |
 | `RENDER_ZOOM` | `2.0` | 页面渲染倍率（1pt→2px，约 144 DPI；改后需重新解析 PDF） |
 | `HOST` / `PORT` | `127.0.0.1` / `8000` | 服务监听 |
@@ -204,6 +204,7 @@ LLM_PROVIDER=custom LLM_BASE_URL=https://your-host/v1 LLM_MODEL=your-model LLM_A
 │   ├── preview-fit-page6.png      # 真实论文第 6 页：密集公式页，译文无裁切无压盖
 │   ├── ui-layout.png              # 界面总览：顶部工具栏 / 底部居中翻页 / 右下角缩放
 │   ├── ui-continuous.png          # 连续滚动：多页纵向堆叠，滚轮往下即下一页
+│   ├── improvements/              # 排版修复前后对照（标题 / 列表 / 段落 / 图表题注）
 │   └── preview-table-preserved.png # 无框线表格整表原样保留（✓/× 网格完好，正文照常翻译）
 └── data/                      # 运行时生成：uploads/ docs/ cache/ debug/ runtime-config.json
 ```
@@ -426,4 +427,9 @@ uv run python tools/preview_preserve.py <docId> 3              # 生成「右栏
 | `docs/ui-layout.png` | 界面总览：工具栏分区、底部居中翻页、右下角缩放 |
 | `docs/ui-continuous.png` | 连续滚动：页面纵向堆叠，第 1 页末尾与第 2 页开头同框 |
 | `docs/preview-table-preserved.png` | 无框线表格：整表透出原件（✓/× 网格完好），正文照常译成中文 |
+| `docs/improvements/01-heading.png` | 章节标题独立成块翻译（不再并进正文首句） |
+| `docs/improvements/02-list.png` | 列表逐项独立成段（编号 / 项间距正确，不再挤成一段） |
+| `docs/improvements/03-paragraph.png` | 整段连续成文（不再在 PyMuPDF 分块处被切断） |
+| `docs/improvements/04-figure-caption.png` | 图片内容保留原件、图题译成中文 |
+| `docs/improvements/05-table-caption.png` | 三线表内容保留原件、表题译成中文 |
 | 本文件 | 使用说明 |
