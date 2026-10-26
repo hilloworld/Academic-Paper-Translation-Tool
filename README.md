@@ -432,4 +432,10 @@ uv run python tools/preview_preserve.py <docId> 3              # 生成「右栏
 | `docs/improvements/03-paragraph.png` | 整段连续成文（不再在 PyMuPDF 分块处被切断） |
 | `docs/improvements/04-figure-caption.png` | 图片内容保留原件、图题译成中文 |
 | `docs/improvements/05-table-caption.png` | 三线表内容保留原件、表题译成中文 |
+| `docs/improvements/06-multi-cocobench-heading.png` | 多论文回归 · CoCoBench：图 3 原样 + 「问题形式化」独立 |
+| `docs/improvements/07-multi-virtualenv-list.png` | 多论文回归 · VirtualEnv：标题独立 + 4 关逐项成段 |
+| `docs/improvements/08-multi-embodiedbench-table.png` | 多论文回归 · EmbodiedBench：三线表原样 + 表题中文 |
+| `docs/improvements/09-multi-simworld-table.png` | 多论文回归 · SimWorld：无框线表格原样 + 表题中文 |
+| `docs/improvements/10-multi-goalswarm-caption.png` | 多论文回归 · GoalSwarm：附录表题译成中文 |
+| `docs/improvements/11-multi-robogs-paragraph.png` | 多论文回归 · RoboGS：整段连续 + 图题中文 |
 | 本文件 | 使用说明 |

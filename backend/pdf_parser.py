@@ -270,18 +270,64 @@ def _row_style_size(line: dict) -> float:
     return float(_row_size([line]) or 0.0)
 
 
-def _style_changed(a: dict, b: dict) -> bool:
-    """相邻两行字号明显不同 → 标题与正文的交界，必须断开。
+_BOLD_FONT_KEYS = ("bold", "medi", "black", "heavy", "semib", "demi")
 
-    标题（实测 11.96pt 粗体）与正文（10.06pt）的行距只有 4pt 左右，只按行距
-    判断一定会并成一段，于是**标题被并进正文、跟着一起翻译**（踩过）。
-    差 1.5pt 或 18% 以上才断；同一段内因行内公式造成的 0.1~0.2pt 抖动不会触发。
+
+def _row_is_bold(line: dict) -> bool:
+    """这一行是否**整体加粗**（行内个别强调词不算）。
+
+    字号断点分不开的标题就靠它：实测某论文的小节标题是 10.91pt / NimbusRomNo9L-Medi
+    （flags 含 bold 位），正文 9.96pt / NimbusRomNo9L-Regu —— 只差 0.95pt（9.5%），
+    不够 ``_style_changed`` 的 1.5pt / 18% 阈值，标题于是被并进正文一起翻译（踩过）。
+    要求「加粗 span 占比 ≥ 60%」而不是「任一行内粗体」：正文里偶尔出现一个加粗术语
+    很常见，那种不能当段落边界。
+    """
+    spans = [s for s in (line.get("spans") or []) if (s.get("text") or "").strip()]
+    if not spans:
+        return False
+    hit = 0
+    for s in spans:
+        font = (s.get("font") or "").lower()
+        if (int(s.get("flags") or 0) & 16) or any(k in font for k in _BOLD_FONT_KEYS):
+            hit += 1
+    return hit >= 0.6 * len(spans)
+
+
+def _style_changed(a: dict, b: dict) -> bool:
+    """相邻两行字号或字重不同 → 标题与正文的交界，必须断开。
+
+    标题与正文的行距常常只有 4–5pt（正文段内是 1pt 左右），只按行距判断一定会
+    并成一段，于是**标题被并进正文、跟着一起翻译**（踩过两次）。
+    判据有两条，任一命中即断：
+    - 字号差 ≥1.5pt 或 ≥18%（实测 11.96 vs 9.96）——同一段内行内公式造成的
+      0.1~0.2pt 抖动不会触发；
+    - **整行加粗状态不同**（实测标题 10.91pt/Medi vs 正文 9.96pt/Regu，字号只差 0.95pt，
+      单靠字号分不开）。这条也能覆盖"同字号但加粗"的小标题。
     """
     sa, sb = _row_style_size(a), _row_style_size(b)
-    if sa <= 0 or sb <= 0:
-        return False
-    hi, lo = max(sa, sb), min(sa, sb)
-    return (hi - lo) >= 1.5 or hi / lo >= 1.18
+    if sa > 0 and sb > 0:
+        hi, lo = max(sa, sb), min(sa, sb)
+        if (hi - lo) >= 1.5 or hi / lo >= 1.18:
+            return _not_same_visual_row(a, b)
+    if _row_is_bold(a) != _row_is_bold(b):
+        return _not_same_visual_row(a, b)
+    return False
+
+
+def _not_same_visual_row(a: dict, b: dict) -> bool:
+    """两块是否属于不同的视觉行。
+
+    **同一 y 上的并排片段绝不算段落边界**：run-in 标题（`Definition of Action Levels.`）
+    与紧随其后的正文首句（`In embodied agent research, …`）就是同一行的左右两段，
+    中间只隔 11pt（超过 ``_stitch_rows`` 的 6pt 缝合阈值，因此没被缝成一行）。
+    按跨度判会把它们拆成两块，而两块的 bbox 纵向完全重叠 → 渲染时正文把标题盖住，
+    标题文字直接消失（踩过，EmbodiedBench p3）。
+    """
+    ab, bb = a["bbox"], b["bbox"]
+    ha = max(1e-6, ab[3] - ab[1])
+    hb = max(1e-6, bb[3] - bb[1])
+    overlap = min(ab[3], bb[3]) - max(ab[1], bb[1])
+    return overlap <= 0.5 * min(ha, hb)
 
 
 def _is_list_start(line: dict, prev: dict | None) -> bool:
@@ -1331,7 +1377,11 @@ def absorb_region(
         if _overlap_ratio(block["bbox"], r["bbox"]) < 0.75:
             continue
         text = block.get("text", "")
-        if _HEADING_RE.match(text):
+        # 章节标题不吸收（区域万一偏大也不能让正文变不翻译）。但"像标题"的判据只对
+        # 1–2 行的块成立：图片里的编号任务清单（`1. Put the KeyChain in the Drawer 2. …`）
+        # 会被 `_HEADING_RE` 误认成章节标题，于是落在图区域内却仍被送去翻译、
+        # 用白底中文把整张图盖住（踩过，CoCoBench p5 的 Figure 2）。
+        if _HEADING_RE.match(text) and int(block.get("line_count", 1) or 1) <= 2:
             continue
         n_lines = max(1, int(block.get("line_count", 1) or 1))
         spacing = (block["bbox"][3] - block["bbox"][1]) / n_lines
@@ -1496,7 +1546,10 @@ def parse_pdf(
                 # 但 References 标题之后的所有块都是
                 if not in_references and _REF_SECTION.fullmatch(b["text"].strip()):
                     in_references = True
-                elif in_references:
+                elif in_references and kind != "caption" and not b.get("table"):
+                    # 图表题注（`Table 9: …`）与表格内容永远不算参考文献：有的论文
+                    # References 之后还跟着 Appendix，`in_references` 会一直延续下去，
+                    # 把附录里的表题一并标成 reference → 题注不再翻译（踩过 4 处）
                     kind = "reference"
                 block = {
                     "id": f"p{page_no}-b{order}",
